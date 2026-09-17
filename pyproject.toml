@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moneyminter"
+version = "1.0.0"
+description = "Money Minter — a fully functional automated forex trading robot"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "pandas>=2.0", "numpy>=1.24", "fastapi>=0.110",
+  "uvicorn[standard]>=0.27", "websockets>=12.0", "pydantic>=2.0", "httpx>=0.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+moneyminter = "moneyminter.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["moneyminter*"]
+
+[tool.setuptools.package-data]
+"moneyminter.web" = ["templates/*.html", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

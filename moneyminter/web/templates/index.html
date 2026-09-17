@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Money Minter — FX Trading Robot</title>
+<link rel="stylesheet" href="/static/style.css"/>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="coin">₣</span> Money&nbsp;Minter <small>automated FX trading robot</small></div>
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">connecting…</span></div>
+</header>
+
+<section class="controls">
+  <label>Strategy <select id="strategy"></select></label>
+  <label>Timeframe <select id="timeframe"></select></label>
+  <label>Balance <input id="balance" type="number" value="10000" step="1000"/></label>
+  <label>Risk/trade % <input id="risk" type="number" value="1" step="0.25"/></label>
+  <label>Speed ×<input id="speed" type="number" value="60" step="10"/></label>
+  <label class="pairs">Pairs <div id="pairs" class="chips"></div></label>
+  <div class="buttons">
+    <button id="startBtn" class="primary">▶ Start bot</button>
+    <button id="stopBtn" class="danger">■ Stop</button>
+    <button id="btBtn">⚗ Backtest</button>
+  </div>
+</section>
+
+<section class="kpis">
+  <div class="kpi"><span>Equity</span><b id="equity">–</b></div>
+  <div class="kpi"><span>P&amp;L</span><b id="pnl">–</b></div>
+  <div class="kpi"><span>Open positions</span><b id="openCount">–</b></div>
+  <div class="kpi"><span>Trades</span><b id="tradeCount">–</b></div>
+  <div class="kpi"><span>Win rate</span><b id="winRate">–</b></div>
+  <div class="kpi"><span>Drawdown</span><b id="dd">–</b></div>
+</section>
+
+<section class="grid">
+  <div class="card wide">
+    <h3>Equity curve</h3>
+    <canvas id="equityChart" height="230"></canvas>
+  </div>
+  <div class="card">
+    <h3>Live prices</h3>
+    <table id="pricesTable"><tbody></tbody></table>
+  </div>
+  <div class="card wide">
+    <h3>Open positions</h3>
+    <table id="positions">
+      <thead><tr><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th><th>Now</th><th>Pips</th><th>P&amp;L</th><th>SL / TP</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h3>Activity</h3>
+    <ul id="events" class="events"></ul>
+  </div>
+  <div class="card wide">
+    <h3>Trade history</h3>
+    <table id="trades">
+      <thead><tr><th>Closed</th><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="card" id="btCard">
+    <h3>Backtest report</h3>
+    <div id="btOut" class="muted">Run a backtest to see performance metrics.</div>
+  </div>
+</section>
+<script src="/static/app.js"></script>
+</body>
+</html>

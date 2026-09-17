@@ -1,0 +1,25 @@
+{
+  "symbols": ["EUR/USD", "GBP/USD", "USD/JPY"],
+  "timeframe": "M1",
+  "strategy": "breakout",
+  "strategy_params": { "entry": 20, "exit": 10, "atr_stop": 2.0, "rr": 3.0 },
+  "balance": 10000.0,
+  "mode": "paper",
+  "speed": 600.0,
+  "tick_interval": 0.5,
+  "source": "synthetic",
+  "journal_path": "data/journal.jsonl",
+  "risk": {
+    "risk_per_trade": 0.01,
+    "max_positions": 3,
+    "max_daily_loss": 0.05,
+    "max_drawdown": 0.25,
+    "max_leverage": 30.0
+  },
+  "execution": {
+    "spread_multiplier": 1.0,
+    "slippage_pips": 0.2,
+    "commission_per_million": 35.0,
+    "swap_pips_per_day": -0.15
+  }
+}
