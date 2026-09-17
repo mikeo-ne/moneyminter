@@ -117,6 +117,104 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+def _live_config(args):
+    """Build a LiveConfig, taking credentials from env vars (never the CLI)."""
+    import os
+    from .live import LiveConfig
+
+    login = os.getenv("MT5_LOGIN")
+    return LiveConfig(
+        symbols=args.symbols, timeframe=args.timeframe, strategy=args.strategy,
+        strategy_params=json.loads(args.params) if args.params else {},
+        risk=_risk_from(args),
+        login=int(login) if login else None,
+        password=os.getenv("MT5_PASSWORD"),
+        server=os.getenv("MT5_SERVER"),
+        terminal_path=os.getenv("MT5_PATH") or args.terminal_path,
+        symbol_suffix=args.symbol_suffix,
+        allow_live=getattr(args, "i_understand_live_risk", False),
+        max_live_balance=getattr(args, "max_live_balance", 500.0),
+        dry_run=getattr(args, "dry_run", False),
+        poll_seconds=getattr(args, "poll", 5.0),
+    )
+
+
+def cmd_connect(args) -> int:
+    """Verify the MT5 connection, resolve symbols and show sizing — sends no orders."""
+    from .live import LiveTrader, MT5Error
+
+    try:
+        trader = LiveTrader(_live_config(args))
+    except MT5Error as exc:
+        print(f"\n❌ {exc}\n")
+        return 2
+    info = trader.preflight()
+    a = info["account"]
+    print(BANNER)
+    print(f"{'DEMO' if a['demo'] else '*** LIVE ***'} account #{a['login']} — {a['name']}")
+    print(f"  Server        : {a['server']}")
+    print(f"  Balance       : {a['balance']:,.2f} {a['currency']}   "
+          f"Equity: {a['equity']:,.2f}   Free margin: {a['free_margin']:,.2f}")
+    print(f"  Leverage      : 1:{a['leverage']}")
+    print("\nSymbols:")
+    for r in info["symbols"]:
+        flag = "✓" if r["ready"] else "✗"
+        print(f"  {flag} {r['symbol']:<9} -> {r['broker_symbol']:<12} "
+              f"price {r['price']:<12.5f} spread {r['spread_points']:>4} pts  "
+              f"min lot {r['min_lot']:<5} step {r['lot_step']:<5} "
+              f"| example trade {r['example_lots']} lots | {r['bars_available']} bars")
+    print("\nIf the symbols and lot sizes look right, start with:")
+    print(f"  python -m moneyminter live --symbols {' '.join(args.symbols)} "
+          f"--timeframe {args.timeframe} --strategy {args.strategy} --dry-run")
+    trader.broker.shutdown()
+    return 0
+
+
+def cmd_live(args) -> int:
+    from .live import LiveTrader, MT5Error
+
+    try:
+        trader = LiveTrader(_live_config(args))
+    except MT5Error as exc:
+        print(f"\n❌ {exc}\n")
+        return 2
+
+    a = trader.broker.account_summary()
+    print(BANNER)
+    if not a["demo"]:
+        print("*" * 68)
+        print(f"*** LIVE MONEY — account #{a['login']}, balance {a['balance']:,.2f} "
+              f"{a['currency']} ***")
+        print("*" * 68)
+        if not args.yes:
+            if input("Type 'TRADE' to confirm real-money trading: ").strip() != "TRADE":
+                print("Aborted.")
+                return 1
+    mode = "DRY RUN (no orders sent)" if args.dry_run else "ARMED"
+    print(f"\n{mode} | {'DEMO' if a['demo'] else 'LIVE'} #{a['login']} | "
+          f"{', '.join(trader.config.symbols)} {args.timeframe} | {args.strategy} | "
+          f"risk {args.risk * 100:.2f}%/trade\nCtrl-C to stop.\n")
+
+    trader.start()
+    try:
+        while True:
+            time.sleep(args.refresh)
+            s = trader.state()
+            print(f"[{time.strftime('%H:%M:%S')}] equity {s['equity']:,.2f} "
+                  f"({s['pnl']:+,.2f}) | open {len(s['positions'])} | "
+                  f"trades {len(trader.broker.trades)}")
+            for ev in s["events"][:1]:
+                if ev["kind"] in ("open", "close", "error", "blocked"):
+                    print(f"          {ev['message']}")
+            if args.duration and (time.time() - trader.start_ts if hasattr(trader, "start_ts") else 0) > args.duration:
+                break
+    except KeyboardInterrupt:
+        print("\nStopping...")
+    trader.stop(close_positions=args.close_on_exit)
+    trader.broker.shutdown()
+    return 0
+
+
 def cmd_strategies(_args) -> int:
     print("\nAvailable strategies:")
     for name, cls in available_strategies().items():
@@ -185,6 +283,32 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--config")
     db.add_argument("--no-autostart", action="store_true")
     db.set_defaults(func=cmd_dashboard)
+
+    def live_flags(sp):
+        sp.add_argument("--symbol-suffix", help="broker symbol suffix, e.g. 'm' for Exness (auto-detected)")
+        sp.add_argument("--terminal-path", help="path to terminal64.exe")
+        sp.add_argument("--poll", type=float, default=5.0, help="seconds between checks")
+
+    cn = sub.add_parser("connect", help="test the MT5/Exness connection (sends no orders)")
+    common(cn, symbols=True)
+    live_flags(cn)
+    cn.set_defaults(func=cmd_connect)
+
+    lv = sub.add_parser("live", help="trade a real MT5/Exness account (demo by default)")
+    common(lv, symbols=True)
+    live_flags(lv)
+    lv.add_argument("--dry-run", action="store_true",
+                    help="run the full loop but never send an order")
+    lv.add_argument("--refresh", type=float, default=15.0)
+    lv.add_argument("--duration", type=float, default=0)
+    lv.add_argument("--close-on-exit", action="store_true",
+                    help="flatten all robot positions when stopping")
+    lv.add_argument("--yes", action="store_true", help="skip the live-account confirmation prompt")
+    lv.add_argument("--i-understand-live-risk", action="store_true",
+                    help="permit trading a REAL-money account (demo-only without this)")
+    lv.add_argument("--max-live-balance", type=float, default=500.0,
+                    help="refuse live accounts richer than this")
+    lv.set_defaults(func=cmd_live)
 
     st = sub.add_parser("strategies", help="list strategies and instruments")
     st.set_defaults(func=cmd_strategies)

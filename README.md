@@ -4,10 +4,10 @@
 simulated broker, event-driven backtester, parameter optimizer and a real-time web
 dashboard, all in one Python package.
 
-> ⚠️ **Money Minter ships in paper-trading mode only.** It executes against a realistic
-> simulated broker (spread, slippage, commission, swap). Nothing here is financial advice,
-> and no strategy included is guaranteed to be profitable. Read [Going live](#going-live)
-> before connecting real money.
+> ⚠️ **Defaults to paper trading.** It can also trade a **real MetaTrader 5 / Exness
+> account** (`connect` / `live` commands) — demo-only unless you explicitly override, see
+> **[LIVE_TRADING.md](LIVE_TRADING.md)**. Nothing here is financial advice, and no strategy
+> included is guaranteed to be profitable.
 
 ---
 
@@ -23,7 +23,8 @@ dashboard, all in one Python package.
 | **Validation** | Grid-search optimizer + walk-forward out-of-sample folds |
 | **Live engine** | Threaded multi-symbol tick loop with a virtual market clock (compress days into minutes) |
 | **Dashboard** | FastAPI + WebSocket UI: live equity curve, positions, trades, activity log, one-click backtests |
-| **Data** | Offline synthetic FX simulator (default), Yahoo Finance history, or your own CSVs |
+| **Live trading** | MetaTrader 5 adapter (Exness & any MT5 broker): symbol-suffix auto-detection, lot conversion, broker-side SL/TP, magic-number isolation |
+| **Data** | Offline synthetic FX simulator (default), Yahoo Finance history, MT5, or your own CSVs |
 
 ## Install
 
@@ -46,7 +47,14 @@ python -m moneyminter trade --symbols EUR/USD GBP/USD USD/JPY --speed 600
 
 # 4. Launch the live dashboard
 python -m moneyminter dashboard --port 8000
+
+# 5. Trade your real Exness demo account (Windows + MT5 required)
+python -m moneyminter connect --symbols EUR/USD          # check connection, no orders
+python -m moneyminter live --symbols EUR/USD --dry-run   # full loop, no orders
+python -m moneyminter live --symbols EUR/USD --risk 0.005
 ```
+
+See **[LIVE_TRADING.md](LIVE_TRADING.md)** for the complete Exness setup guide.
 
 ### Example backtest output
 
@@ -74,6 +82,8 @@ python -m moneyminter dashboard --port 8000
 | `walkforward` | Sequential out-of-sample folds (`--folds 4`) to check robustness |
 | `trade` | Run the robot live against the paper broker |
 | `dashboard` | Web UI + REST/WebSocket API |
+| `connect` | Verify an MT5/Exness connection, resolve symbols, preview lot sizes |
+| `live` | Trade a real MT5/Exness account (demo-only by default) |
 | `strategies` | List strategies and instruments |
 
 Shared flags: `--symbol/--symbols --timeframe --strategy --balance --source {synthetic,yahoo,csv}
@@ -176,14 +186,18 @@ print(bot.state()["equity"])
 ## Tests
 
 ```bash
-python -m pytest tests -q     # 22 tests: indicators, risk maths, broker P&L, strategies, engine, API
+python -m pytest tests -q     # 37 tests: indicators, risk maths, broker P&L, strategies,
+                              # engine, web API, and the MT5 adapter (mocked terminal)
 ```
 
 ## Going live
 
-The `Broker` abstract base class in `moneyminter/broker.py` is the single integration point.
-To trade a real account, implement `open()`, `close()` and `equity()` against your broker's
-API (OANDA v20, IG, cTrader, MT5 bridge…) and pass it to the engine. Before you do:
+**MetaTrader 5 / Exness is supported out of the box** — see
+**[LIVE_TRADING.md](LIVE_TRADING.md)**. Note the `MetaTrader5` package is Windows-only.
+
+For other brokers, the `Broker` base class in `moneyminter/broker.py` is the single
+integration point: implement `open()`, `close()` and `equity()` (see
+`moneyminter/live/mt5_broker.py` as a reference). Before you risk real money:
 
 1. Run `walkforward` — if out-of-sample folds don't hold up, the edge isn't real.
 2. Paper trade for weeks, not hours.
