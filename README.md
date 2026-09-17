@@ -48,7 +48,7 @@ python -m moneyminter trade --symbols EUR/USD GBP/USD USD/JPY --speed 600
 # 4. Launch the live dashboard
 python -m moneyminter dashboard --port 8000
 
-# 5. Trade your real Exness demo account (Windows + MT5 required)
+# 5. Trade your real Exness demo account (Windows / macOS / Linux — see LIVE_TRADING.md)
 python -m moneyminter connect --symbols EUR/USD          # check connection, no orders
 python -m moneyminter live --symbols EUR/USD --dry-run   # full loop, no orders
 python -m moneyminter live --symbols EUR/USD --risk 0.005
@@ -192,8 +192,10 @@ python -m pytest tests -q     # 37 tests: indicators, risk maths, broker P&L, st
 
 ## Going live
 
-**MetaTrader 5 / Exness is supported out of the box** — see
-**[LIVE_TRADING.md](LIVE_TRADING.md)**. Note the `MetaTrader5` package is Windows-only.
+**MetaTrader 5 / Exness is supported out of the box** on **Windows, macOS and Linux** —
+see **[LIVE_TRADING.md](LIVE_TRADING.md)**. The official `MetaTrader5` package is
+Windows-only, so Money Minter also ships a `mt5_mac` backend for macOS and an RPyC remote
+backend for Linux/Wine, Docker, or a Windows VPS (`--mt5-host`).
 
 For other brokers, the `Broker` base class in `moneyminter/broker.py` is the single
 integration point: implement `open()`, `close()` and `equity()` (see

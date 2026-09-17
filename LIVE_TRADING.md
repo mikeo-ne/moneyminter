@@ -10,23 +10,88 @@ your **Exness demo account**.
 
 ---
 
-## 0. The one hard requirement
+## 0. Pick your setup (Mac / Linux / Windows)
 
-The `MetaTrader5` Python package **only runs on Windows**. Your options:
+The official `MetaTrader5` Python package is Windows-only. Money Minter works around that
+with three backends — pick the row that matches your machine:
 
-| Setup | Works? |
-|---|---|
-| Windows PC/laptop | ✅ Easiest |
-| Windows VPS (~$10/mo, keeps the bot running 24/5) | ✅ Best for real use |
-| Linux/macOS + MT5 under Wine + Windows Python | ⚠️ Possible, fiddly |
-| Linux/macOS natively | ❌ Not supported by MetaQuotes |
+| Your machine | Backend | What you install |
+|---|---|---|
+| **Windows** | `local` | `pip install MetaTrader5` |
+| **macOS** (Intel or Apple Silicon) | `mac` | MT5 for macOS + `pip install mt5_mac` |
+| **Linux**, or Mac where `mt5_mac` misbehaves | `rpyc` | MT5 under Wine + a bridge, then `--mt5-host` |
+| **Any machine + a Windows VPS** | `rpyc` | Bridge on the VPS, `--mt5-host <vps-ip>` |
 
-If you're not on Windows, you can still use every other part of the robot
-(`backtest`, `optimize`, `walkforward`, `trade`, `dashboard`) — they run anywhere.
+Money Minter auto-detects, so usually you don't pass anything. Jump to
+[§0a macOS](#0a-macos) or [§0b Linux](#0b-linux), then continue at §1.
+
+### 0a. macOS
+
+MetaTrader ships a macOS build that is really the Windows binary inside a bundled Wine
+wrapper, and `mt5_mac` talks to the Python inside it.
+
+```bash
+# 1. Install MetaTrader 5 for macOS from https://www.metatrader5.com/en/download
+#    (it must end up at /Applications/MetaTrader 5.app)
+pip install mt5_mac        # first run auto-downloads a small Windows Python into MT5's Wine
+```
+
+Then use the normal commands — add `--mt5-backend mac` if auto-detection picks wrong:
+
+```bash
+python -m moneyminter connect --symbols EUR/USD --mt5-backend mac
+```
+
+If that proves flaky (Wine on Apple Silicon can be), use the Docker bridge instead:
+
+```bash
+pip install siliconmetatrader5     # runs MT5 in Docker/QEMU, serves RPyC on 8001
+python -m moneyminter connect --symbols EUR/USD --mt5-host 127.0.0.1 --mt5-port 8001
+```
+
+### 0b. Linux
+
+Run MT5 under Wine, then expose its Python API over a local bridge.
+
+```bash
+# 1. Wine + MT5
+sudo apt install wine winetricks          # or: sudo pacman -S wine winetricks
+wget https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
+wine mt5setup.exe                          # install, log into Exness, enable Algo Trading
+
+# 2. Windows Python *inside* the same Wine prefix, plus the MT5 packages
+wine python-3.9.13-amd64.exe               # from python.org, tick "Add to PATH"
+wine python -m pip install MetaTrader5 mt5linux
+
+# 3. Start the bridge (leave this running, MT5 open)
+wine python -m mt5linux
+
+# 4. From your NATIVE Linux python, in another terminal:
+pip install rpyc
+python -m moneyminter connect --symbols EUR/USD --mt5-host 127.0.0.1
+```
+
+### 0c. Windows VPS (most reliable for 24/5 running)
+
+Rent a Windows VPS (~$10/mo), install MT5 + Python + `MetaTrader5` + `mt5linux` there, and
+either run Money Minter entirely on the VPS (simplest — follow the Windows path) or run the
+bridge there and drive it from your laptop:
+
+```bash
+# on the VPS
+python -m mt5linux
+# on your Mac/Linux laptop
+python -m moneyminter connect --symbols EUR/USD --mt5-host <vps-ip>
+```
+
+> **Security:** the bridge is unauthenticated — anyone who can reach that port controls your
+> account. Keep it on `localhost`, or tunnel over SSH
+> (`ssh -L 18812:localhost:18812 user@vps`) and still connect to `127.0.0.1`. Never open
+> port 18812 to the internet.
 
 ## 1. Prepare MT5
 
-1. Install **MetaTrader 5** and log into your **Exness demo** account
+1. Install **MetaTrader 5** (per §0 for your OS) and log into your **Exness demo** account
    (MT5 → File → Login to Trade Account). Note the server name, e.g. `Exness-MT5Trial`.
 2. Enable automation: **Tools → Options → Expert Advisors → ✅ Allow algorithmic trading**.
 3. Click the **Algo Trading** button in the toolbar so it's green.
@@ -145,7 +210,10 @@ consistent results, never after a good week.
 
 | Symptom | Fix |
 |---|---|
-| `MetaTrader5 package is required... Windows` | You're not on Windows — see §0 |
+| `No MetaTrader 5 backend available` | Install a backend for your OS — see §0 |
+| `Could not reach the MT5 bridge` | Bridge not running, or wrong host/port — see §0b |
+| macOS: `MetaTrader 5.app not found` | Install MT5 from metatrader5.com into /Applications |
+| Wine: `IPC timeout` | Known Wine flakiness — use the Docker bridge (§0a) or a VPS (§0c) |
 | `initialize() failed` | Terminal not running, not logged in, or wrong `--terminal-path` |
 | `Algo Trading is disabled` | Toolbar toggle + Tools → Options (§1) |
 | `Symbol EUR/USD not found` | Show it in Market Watch, or set `--symbol-suffix` |

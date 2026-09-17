@@ -38,6 +38,10 @@ class LiveConfig:
     allow_live: bool = False
     max_live_balance: float = 500.0
     dry_run: bool = False
+    # remote / alternative backends (macOS, Linux+Wine, LAN Windows box)
+    host: Optional[str] = None
+    port: int = 18812
+    backend: str = "auto"
     poll_seconds: float = 5.0
     history_bars: int = 600
 
@@ -50,7 +54,8 @@ class LiveTrader:
             login=config.login, password=config.password, server=config.server,
             path=config.terminal_path, allow_live=config.allow_live,
             max_live_balance=config.max_live_balance, symbol_suffix=config.symbol_suffix,
-            dry_run=config.dry_run)
+            dry_run=config.dry_run, host=config.host, port=config.port,
+            backend=config.backend)
         self.risk = RiskManager(config.risk)
         self.strategies: Dict[str, Strategy] = {
             s: get_strategy(config.strategy, **config.strategy_params) for s in self.config.symbols

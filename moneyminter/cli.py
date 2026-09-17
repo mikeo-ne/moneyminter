@@ -135,6 +135,9 @@ def _live_config(args):
         allow_live=getattr(args, "i_understand_live_risk", False),
         max_live_balance=getattr(args, "max_live_balance", 500.0),
         dry_run=getattr(args, "dry_run", False),
+        host=args.mt5_host or os.getenv("MT5_HOST"),
+        port=args.mt5_port,
+        backend=args.mt5_backend,
         poll_seconds=getattr(args, "poll", 5.0),
     )
 
@@ -288,6 +291,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--symbol-suffix", help="broker symbol suffix, e.g. 'm' for Exness (auto-detected)")
         sp.add_argument("--terminal-path", help="path to terminal64.exe")
         sp.add_argument("--poll", type=float, default=5.0, help="seconds between checks")
+        sp.add_argument("--mt5-host", help="host of a remote MT5 bridge (Linux/Wine, macOS "
+                                           "Docker, or a Windows box on your LAN)")
+        sp.add_argument("--mt5-port", type=int, default=18812,
+                        help="bridge port (mt5linux 18812, siliconmetatrader5 8001)")
+        sp.add_argument("--mt5-backend", default="auto",
+                        choices=["auto", "local", "mac", "rpyc"],
+                        help="which MT5 backend to use (default: auto-detect)")
 
     cn = sub.add_parser("connect", help="test the MT5/Exness connection (sends no orders)")
     common(cn, symbols=True)

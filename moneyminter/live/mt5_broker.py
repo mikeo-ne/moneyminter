@@ -44,18 +44,78 @@ class MT5Error(RuntimeError):
     pass
 
 
-def _import_mt5():
+def _import_mt5(host: Optional[str] = None, port: int = 18812, backend: str = "auto"):
+    """Return a MetaTrader5-compatible module.
+
+    Backends, in the order ``auto`` tries them:
+
+    ``local``   the official ``MetaTrader5`` package (Windows only).
+    ``mac``     ``mt5_mac`` — drives the Wine runtime bundled inside
+                MetaTrader 5.app on macOS (Intel and Apple Silicon).
+    ``rpyc``    a remote bridge exposing the MT5 API over RPyC. Works with
+                ``mt5linux``/``mt5-server`` (Linux+Wine, port 18812) and
+                ``siliconmetatrader5`` (Docker on Apple Silicon, port 8001),
+                or a Windows box on your LAN running the same server.
+    """
+    if backend in ("auto", "rpyc") and host:
+        return _connect_rpyc(host, port)
+
+    if backend in ("auto", "local"):
+        try:
+            import MetaTrader5 as mt5  # type: ignore
+            return mt5
+        except ImportError:
+            if backend == "local":
+                raise MT5Error(_WINDOWS_ONLY_HELP) from None
+
+    if backend in ("auto", "mac"):
+        try:
+            import mt5_mac  # type: ignore
+            log.info("Using the mt5_mac backend (MetaTrader 5.app bundled Wine)")
+            return mt5_mac
+        except ImportError:
+            if backend == "mac":
+                raise MT5Error(
+                    "The 'mt5_mac' package is required for the macOS backend.\n"
+                    "  pip install mt5_mac\n"
+                    "It also needs MetaTrader 5 installed from metatrader5.com "
+                    "at /Applications/MetaTrader 5.app"
+                ) from None
+
+    raise MT5Error(_WINDOWS_ONLY_HELP)
+
+
+def _connect_rpyc(host: str, port: int):
     try:
-        import MetaTrader5 as mt5  # type: ignore
-        return mt5
-    except ImportError as exc:  # pragma: no cover - platform dependent
+        import rpyc  # type: ignore
+    except ImportError:
+        raise MT5Error("Remote MT5 needs rpyc:  pip install rpyc") from None
+    try:
+        conn = rpyc.classic.connect(host, port)
+    except Exception as exc:  # noqa: BLE001
         raise MT5Error(
-            "The 'MetaTrader5' package is required for live trading and is only "
-            "available on Windows.\n"
-            "  pip install MetaTrader5\n"
-            "On Linux/macOS run the MT5 terminal under Wine, or use a Windows VPS. "
-            "Until then use paper mode: `python -m moneyminter trade`."
+            f"Could not reach the MT5 bridge at {host}:{port} ({exc}).\n"
+            "Start the bridge on the machine running MetaTrader 5:\n"
+            "  Linux/Wine : python -m mt5linux <path-to-windows-python.exe>\n"
+            "  Windows    : python -m mt5linux\n"
+            "  Apple M-series: docker compose up  (siliconmetatrader5, port 8001)"
         ) from exc
+    log.info("Connected to remote MT5 bridge at %s:%s", host, port)
+    mt5 = conn.modules.MetaTrader5
+    mt5._mm_rpyc_conn = conn   # keep a reference so the socket stays open
+    return mt5
+
+
+_WINDOWS_ONLY_HELP = (
+    "No MetaTrader 5 backend available.\n"
+    "The official 'MetaTrader5' package only runs on Windows. Options:\n"
+    "  Windows      : pip install MetaTrader5\n"
+    "  macOS        : pip install mt5_mac        (then --mt5-backend mac)\n"
+    "  Linux/macOS  : run MT5 under Wine or on another machine and start a\n"
+    "                 bridge, then pass --mt5-host <ip> [--mt5-port 18812]\n"
+    "Until then, everything else works offline: `python -m moneyminter trade`."
+)
+
 
 
 class MT5Broker(Broker):
@@ -65,8 +125,10 @@ class MT5Broker(Broker):
                  server: Optional[str] = None, path: Optional[str] = None,
                  allow_live: bool = False, max_live_balance: float = 500.0,
                  magic: int = 990707, deviation: int = 20, symbol_suffix: Optional[str] = None,
-                 dry_run: bool = False):
-        self.mt5 = _import_mt5()
+                 dry_run: bool = False, host: Optional[str] = None, port: int = 18812,
+                 backend: str = "auto"):
+        self.mt5 = _import_mt5(host=host, port=port, backend=backend)
+        self.remote = bool(host)
         self.allow_live = allow_live
         self.max_live_balance = max_live_balance
         self.magic = magic

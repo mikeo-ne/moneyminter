@@ -15,7 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "rpyc>=5.3"]
+mac = ["mt5_mac>=0.3"]
+remote = ["rpyc>=5.3"]
 
 [project.scripts]
 moneyminter = "moneyminter.cli:main"
