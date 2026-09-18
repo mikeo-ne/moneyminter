@@ -117,16 +117,36 @@ class LiveTrader:
         self._emit("info", "Live trading stopped")
 
     def _loop(self) -> None:
+        """Poll forever, surviving disconnects.
+
+        A VPS will drop the terminal link occasionally (broker restarts, network
+        blips, MT5 updates). Rather than dying or spamming, back off and try to
+        reconnect; consecutive failures widen the delay up to a minute.
+        """
+        failures = 0
         while self.running:
             try:
                 self.poll()
+                if failures:
+                    self._emit("info", "Recovered — connection restored")
+                failures = 0
             except MT5Error as exc:
-                log.error("broker error: %s", exc)
-                self._emit("error", str(exc))
+                failures += 1
+                log.error("broker error (%d): %s", failures, exc)
+                if failures == 1 or failures % 10 == 0:
+                    self._emit("error", str(exc))
+                if not self.broker.is_connected():
+                    self._emit("warn", "Terminal link lost — attempting reconnect")
+                    if self.broker.reconnect():
+                        self._emit("info", "Reconnected to MT5")
+                        failures = 0
             except Exception as exc:  # noqa: BLE001
+                failures += 1
                 log.exception("live loop error")
                 self._emit("error", f"{type(exc).__name__}: {exc}")
-            time.sleep(self.config.poll_seconds)
+            delay = self.config.poll_seconds if not failures else \
+                min(self.config.poll_seconds * (2 ** min(failures, 4)), 60.0)
+            time.sleep(delay)
 
     def poll(self) -> None:
         """Check each symbol; act only when a new bar has closed."""
@@ -134,8 +154,14 @@ class LiveTrader:
         equity = self.broker.equity()
         self.risk.update_equity(equity, now.date())
 
+        errors = []
         for sym in self.config.symbols:
-            df = self.broker.candles(sym, self.config.timeframe, self.config.history_bars)
+            try:
+                df = self.broker.candles(sym, self.config.timeframe, self.config.history_bars)
+            except MT5Error as exc:
+                # one unavailable symbol must not stop the others
+                errors.append(f"{sym}: {exc}")
+                continue
             if len(df) < 3:
                 continue
             # the last row is the still-forming bar; act on the last CLOSED one
@@ -144,7 +170,14 @@ class LiveTrader:
             if self._last_bar.get(sym) == bar_ts:
                 continue
             self._last_bar[sym] = bar_ts
-            self._on_closed_bar(sym, closed, now, equity)
+            try:
+                self._on_closed_bar(sym, closed, now, equity)
+            except MT5Error as exc:
+                errors.append(f"{sym}: {exc}")
+        if errors and len(errors) == len(self.config.symbols):
+            raise MT5Error("; ".join(errors[:3]))   # everything failed -> reconnect
+        for e in errors:
+            self._emit("error", e)
 
     def _on_closed_bar(self, symbol: str, df, now: datetime, equity: float) -> None:
         strat = self.strategies[symbol]

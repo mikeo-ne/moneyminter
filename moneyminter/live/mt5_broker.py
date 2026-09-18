@@ -144,6 +144,7 @@ class MT5Broker(Broker):
             kwargs["path"] = path
         if login:
             kwargs.update(login=int(login), password=password, server=server)
+        self._init_kwargs = dict(kwargs)
         if not self.mt5.initialize(**kwargs):
             raise MT5Error(f"MT5 initialize() failed: {self.mt5.last_error()}. "
                            "Is the terminal running and logged in?")
@@ -385,13 +386,23 @@ class MT5Broker(Broker):
         return out
 
     def equity(self, prices=None) -> float:
+        """Current account equity.
+
+        Raises rather than returning 0.0 on failure: a 0 equity would look like
+        a 100% drawdown to the risk manager and latch the kill switch for good
+        on what may be a momentary disconnect.
+        """
         info = self.mt5.account_info()
-        return float(info.equity) if info else 0.0
+        if info is None:
+            raise MT5Error(f"Lost connection to the MT5 terminal: {self.mt5.last_error()}")
+        return float(info.equity)
 
     @property
     def balance(self) -> float:
         info = self.mt5.account_info()
-        return float(info.balance) if info else 0.0
+        if info is None:
+            raise MT5Error(f"Lost connection to the MT5 terminal: {self.mt5.last_error()}")
+        return float(info.balance)
 
     def position_for(self, symbol: str, strategy: str | None = None) -> Optional[Position]:
         want = self.resolve_symbol(symbol)
@@ -407,10 +418,33 @@ class MT5Broker(Broker):
 
     def account_summary(self) -> dict:
         i = self.mt5.account_info()
+        if i is None:
+            raise MT5Error(f"Lost connection to the MT5 terminal: {self.mt5.last_error()}")
         return {"login": i.login, "server": i.server, "name": i.name,
                 "currency": i.currency, "balance": i.balance, "equity": i.equity,
                 "margin": i.margin, "free_margin": i.margin_free,
                 "leverage": i.leverage, "demo": self.is_demo}
+
+    def is_connected(self) -> bool:
+        try:
+            return self.mt5.account_info() is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def reconnect(self) -> bool:
+        """Try to re-establish the terminal link after a dropout."""
+        try:
+            self.mt5.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ok = self.mt5.initialize(**self._init_kwargs)
+            if ok and self.mt5.account_info() is not None:
+                log.info("Reconnected to the MT5 terminal")
+                return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Reconnect failed: %s", exc)
+        return False
 
     def shutdown(self) -> None:
         try:

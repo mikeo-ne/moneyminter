@@ -4,7 +4,7 @@ This guide takes you from a working MT5 terminal to the robot placing orders on
 your **Exness demo account**.
 
 > **Read this first.** Money Minter refuses to touch a real-money account unless you
-> pass an explicit override flag. That default is deliberate — keep it until the robot
+> pass an explicit override flag (see [Moving to a live account](#moving-to-a-live-account)). That default is deliberate — keep it until the robot
 > has proven itself on demo for weeks. Nothing here is financial advice, and the
 > backtest numbers in the README come from a *simulator*, not real market data.
 
@@ -194,17 +194,95 @@ Built-in protections, all enforced in code and covered by tests:
   so your risk is capped even if your PC dies.
 - **Algo Trading check** before a single order is sent.
 
-## 8. Going to real money (later)
+# Windows VPS quick start (recommended)
 
-Only after weeks of profitable demo:
+A VPS keeps the bot trading 24/5 with your laptop closed. Full walkthrough:
 
+### 1. Rent and prepare
+Any Windows VPS with 2 GB+ RAM works (Contabo, Vultr, Hostinger, Exness sometimes
+offers a free VPS to funded accounts). Connect over RDP, then install:
+
+- **MetaTrader 5** (from Exness so the server list is preloaded) — log into your demo
+- **Python 3.11+** from python.org — tick **"Add python.exe to PATH"**
+- **Git** from git-scm.com
+
+### 2. Install the bot
 ```powershell
-python -m moneyminter live --symbols EUR/USD --timeframe M5 --risk 0.0025 `
-    --i-understand-live-risk --max-live-balance 100
+git clone -b arena/01a0b105-moneyminter https://github.com/mikeo-ne/moneyminter
+cd moneyminter
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+pip install MetaTrader5
 ```
 
-Fund with an amount you are fully prepared to lose. Scale up only after months of
-consistent results, never after a good week.
+### 3. Verify, then run
+```powershell
+python -m moneyminter connect --symbols EURUSD GBPUSD   # no orders
+python -m moneyminter live --symbols EURUSD --dry-run   # no orders
+python -m moneyminter live --symbols EURUSD GBPUSD --timeframe M5 --risk 0.005
+```
+
+### 4. Keep it running
+Use `deploy\moneyminter.bat` — it restarts the bot automatically if it crashes, and
+can be added to the startup folder (`Win+R` → `shell:startup`). See
+[deploy/README.md](deploy/README.md).
+
+**Two VPS gotchas that will silently stop your bot:**
+- Always leave RDP with **Disconnect**, never "Sign out" — signing out kills MT5.
+- Set Power Options to **High performance** with sleep disabled.
+
+### 5. Health check
+```powershell
+python -m moneyminter live --symbols EURUSD --once
+```
+Runs one poll, prints equity and recent events, exits. Good for a scheduled heartbeat.
+
+### Resilience built in
+The bot expects a VPS to be imperfect. If the terminal link drops it backs off
+(5s → up to 60s), reconnects automatically, and resumes — it does **not** treat a
+disconnect as a loss. A single unavailable symbol is skipped rather than stopping the
+other pairs.
+
+---
+
+# Moving to a live account
+
+Only after **weeks** of profitable demo on the same settings.
+
+Money Minter blocks live trading by default. To enable it you must clear three gates:
+
+```powershell
+python -m moneyminter live --symbols EURUSD --timeframe M5 `
+    --risk 0.0025 `
+    --i-understand-live-risk `
+    --max-live-balance 100
+```
+
+1. `--i-understand-live-risk` — without it a live account is refused outright.
+2. `--max-live-balance` — it still refuses if the balance exceeds this (default **500**).
+   Set it just above your actual balance, deliberately.
+3. A typed **`TRADE`** confirmation at the prompt (skip with `--yes` only in scripts).
+
+### Sensible first live settings
+| Setting | Value | Why |
+|---|---|---|
+| Deposit | $50–100 | Lose it all and nothing changes in your life |
+| `--risk` | `0.0025` (0.25%) | Quarter of the demo default |
+| `--max-positions` | `1` | One thing to watch |
+| `--max-daily-loss` | `0.02` | Stops for the day at −2% |
+| `--max-drawdown` | `0.10` | Hard kill switch at −10% |
+
+Use an **Exness Cent account** for a first live test: lot sizes are 100× smaller, so
+risk-based sizing actually fits a small balance instead of being skipped for being
+below the minimum lot.
+
+### Expect this to lose money at first
+The strategies here are textbook (EMA cross, Donchian breakout, RSI). They are a working
+*framework*, not a proven edge. The README's backtest figures come from a **simulator**.
+Treat your first live months as paying tuition to validate the plumbing, not as income.
+
+---
 
 ## Troubleshooting
 
@@ -221,5 +299,7 @@ consistent results, never after a good week.
 | `retcode=10019` | Insufficient margin — lower `--risk` |
 | "below the broker minimum — skipping" | Account too small for that stop; see §7 |
 | Nothing happens for ages | Normal — it waits for closed bars *and* a signal. Use `-v` |
+| `Lost connection to the MT5 terminal` | MT5 closed or the VPS signed you out (use Disconnect) |
+| Bot stopped after a network blip | Shouldn't happen — it auto-reconnects. Report it with `-v` logs |
 
 Run `python -m moneyminter live -v` for verbose logs.

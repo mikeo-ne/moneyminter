@@ -198,6 +198,15 @@ def cmd_live(args) -> int:
           f"{', '.join(trader.config.symbols)} {args.timeframe} | {args.strategy} | "
           f"risk {args.risk * 100:.2f}%/trade\nCtrl-C to stop.\n")
 
+    if args.once:
+        trader.poll()
+        s = trader.state()
+        print(f"single poll ok | equity {s['equity']:,.2f} | open {len(s['positions'])}")
+        for ev in s["events"][:5]:
+            print(f"  {ev['kind']}: {ev['message']}")
+        trader.broker.shutdown()
+        return 0
+
     trader.start()
     try:
         while True:
@@ -314,6 +323,8 @@ def build_parser() -> argparse.ArgumentParser:
     lv.add_argument("--close-on-exit", action="store_true",
                     help="flatten all robot positions when stopping")
     lv.add_argument("--yes", action="store_true", help="skip the live-account confirmation prompt")
+    lv.add_argument("--once", action="store_true",
+                    help="run a single poll and exit (for cron / health checks)")
     lv.add_argument("--i-understand-live-risk", action="store_true",
                     help="permit trading a REAL-money account (demo-only without this)")
     lv.add_argument("--max-live-balance", type=float, default=500.0,

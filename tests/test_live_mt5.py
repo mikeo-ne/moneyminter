@@ -246,3 +246,69 @@ def test_remote_rpyc_bridge_roundtrip(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+# ------------------------------------------------- VPS resilience
+def test_equity_raises_instead_of_reporting_zero(mt5):
+    """A 0.0 equity would look like a 100% drawdown and latch the kill switch."""
+    m = mt5()
+    from moneyminter.live import MT5Broker, MT5Error
+    b = MT5Broker()
+    m.account_info = lambda: None
+    with pytest.raises(MT5Error, match="Lost connection"):
+        b.equity()
+    with pytest.raises(MT5Error, match="Lost connection"):
+        b.balance
+
+
+def test_drawdown_killswitch_not_tripped_by_a_disconnect(mt5):
+    """Regression: a momentary dropout must not permanently halt trading."""
+    m = mt5()
+    from moneyminter.live import LiveConfig, LiveTrader
+    t = LiveTrader(LiveConfig(symbols=["EUR/USD"], timeframe="M5"))
+    m.account_info = lambda: None          # terminal goes away
+    with pytest.raises(Exception):
+        t.poll()
+    assert t.risk.halted_reason is None    # not latched
+    assert t.risk.peak_equity == 10_000    # peak untouched by a bogus 0
+
+
+def test_is_connected_and_reconnect(mt5):
+    m = mt5()
+    from moneyminter.live import MT5Broker
+    b = MT5Broker()
+    assert b.is_connected()
+    acct = m.account_info
+    m.account_info = lambda: None
+    assert not b.is_connected()
+    m.account_info = acct                  # link comes back
+    assert b.reconnect() and b.is_connected()
+
+
+def test_one_bad_symbol_does_not_stop_the_others(mt5):
+    m = mt5()
+    from moneyminter.live import LiveConfig, LiveTrader
+    t = LiveTrader(LiveConfig(symbols=["EUR/USD", "GBP/USD"], timeframe="M5"))
+    real = m.copy_rates_from_pos
+    m.copy_rates_from_pos = lambda name, *a, **k: None if name == "EURUSDm" else real(name, *a, **k)
+    t.poll()                                # must not raise
+    assert any("EUR/USD" in e["message"] for e in t.events)
+    assert "GBP/USD" in t._last_bar         # the healthy symbol still traded
+
+
+def test_total_failure_escalates_for_reconnect(mt5):
+    m = mt5()
+    from moneyminter.live import LiveConfig, LiveTrader, MT5Error
+    t = LiveTrader(LiveConfig(symbols=["EUR/USD", "GBP/USD"], timeframe="M5"))
+    m.copy_rates_from_pos = lambda *a, **k: None
+    with pytest.raises(MT5Error):
+        t.poll()
+
+
+def test_order_rejection_is_reported(mt5):
+    m = mt5()
+    from moneyminter.live import MT5Broker, MT5Error
+    b = MT5Broker()
+    m.order_send = lambda r: mock_mt5._Result(10019, comment="No money")
+    with pytest.raises(MT5Error, match="10019"):
+        b.open("EUR/USD", Side.BUY, 100_000)
