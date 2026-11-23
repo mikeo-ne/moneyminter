@@ -409,3 +409,28 @@ def test_stale_history_is_not_mistaken_for_clock_skew(mt5):
     m.copy_rates_from_pos = rates
     from moneyminter.live import MT5Broker
     assert MT5Broker()._clock_offset_s == 0
+
+
+def test_symbol_scan_prefers_fx_over_lookalike_crypto(mt5):
+    """A 'EURUSD' request must not resolve to 'EURUSDT'.
+
+    Exness demo accounts list crypto pairs alongside FX; a naive prefix match
+    would hand the robot the wrong instrument entirely.
+    """
+    m = mt5()
+    real_info, real_get, real_sel = m.symbol_info, m.symbols_get, m.symbol_select
+
+    class _Info:
+        def __init__(self, name):
+            self.name, self.visible = name, True
+
+    m.symbol_info = lambda name: None          # force the scan path
+    m.symbols_get = lambda: [_Info("EURUSDT"), _Info("EURUSDc"), _Info("EURUSD")]
+    m.symbol_select = lambda name, on: True
+    from moneyminter.live import MT5Broker
+    b = MT5Broker()
+    assert b.resolve_symbol("EUR/USD") == "EURUSD"
+
+    m.symbols_get = lambda: [_Info("EURUSDT"), _Info("EURUSDm")]
+    b2 = MT5Broker()
+    assert b2.resolve_symbol("EUR/USD") == "EURUSDm"

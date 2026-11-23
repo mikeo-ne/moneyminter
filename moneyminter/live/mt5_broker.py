@@ -215,15 +215,45 @@ class MT5Broker(Broker):
                 if cand != base:
                     log.info("Resolved %s -> %s", symbol, cand)
                 return cand
-        # last resort: scan everything the broker offers
-        for info in (self.mt5.symbols_get() or []):
-            if info.name.upper().startswith(base):
-                self.mt5.symbol_select(info.name, True)
-                self._symbol_cache[symbol] = info.name
-                self._display_symbols[info.name.upper()] = symbol
-                return info.name
-        raise MT5Error(f"Symbol {symbol} not found on this account (tried {candidates}). "
-                       "Check Market Watch, or pass --symbol-suffix.")
+        # Last resort: scan everything the broker offers. Ordering matters —
+        # a plain ``startswith`` would happily return ``EURUSDT`` (a crypto
+        # pair) when the caller asked for ``EUR/USD``, and the robot would then
+        # "trade EURUSD" on the wrong instrument. So rank the matches: an exact
+        # name wins, then a known suffix, then the shortest remainder.
+        if self._suffix is None:
+            ranked = []
+            for info in (self.mt5.symbols_get() or []):
+                # Symbol names are case-sensitive in MT5 ('EURUSDm'), so keep
+                # the broker's original spelling and only upper-case for
+                # comparison.
+                name = info.name or ""
+                key = name.upper()
+                if not key.startswith(base):
+                    continue
+                rest = key[len(base):]
+                if rest == "":
+                    rank = 0
+                elif rest.lower() in _SUFFIXES:
+                    rank = 1
+                elif len(rest) <= 3:
+                    rank = 2
+                else:
+                    # e.g. 'USDT' off a 'EURUSD' base: a different instrument
+                    continue
+                ranked.append((rank, len(name), name))
+            if ranked:
+                ranked.sort()
+                best = ranked[0][2]
+                self.mt5.symbol_select(best, True)
+                self._symbol_cache[symbol] = best
+                self._display_symbols[best.upper()] = symbol
+                if best != base:
+                    log.info("Resolved %s -> %s (by scan)", symbol, best)
+                return best
+        raise MT5Error(
+            f"Symbol {symbol} not found on this account (tried {candidates}). "
+            "Open Market Watch, right-click and choose 'Show All', then retry. "
+            "If your broker suffixes symbols differently, pass --symbol-suffix.")
 
     def display_symbol(self, broker_symbol: str) -> str:
         """Map a broker name ('EURUSDm') back to the user-facing 'EUR/USD'."""

@@ -70,20 +70,49 @@ down, and click **Open Anyway**. Then launch it again.
 **Check:** the bottom-right of MT5 shows your account number, `USD`, balance
 `10,000.00`, and a green/blue connection indicator.
 
+> A newly created demo often sits in a **login dialog inside the Wine window** —
+> the small window with Login / Password / Server fields. Don't close it; fill
+> in the password you set at signup (Exness emails it to you) and click
+> **OK**. MT5 is not usable until that window is dismissed. If you lost the
+> password, create a fresh demo from **File → Open an Account**.
+
 ### Turn on algorithmic trading
 
-Two separate toggles — you need both:
+Go to **Tools → Options → Experts** and make sure these are set as follows:
 
-1. **Tools → Options → Expert Advisors → ✅ Allow algorithmic trading**
-2. Click the **Algo Trading** button in the top toolbar so it turns **green**
+| Setting | State | Why |
+|---|---|---|
+| **Allow algorithmic trading** | ✅ **ticked** | Without this nothing can place an order |
+| Disable algorithmic trading when the account has been changed | ⬜ unticked | Otherwise a reconnect silently disables the robot |
+| Disable ... when the profile has been changed | ⬜ unticked | Same |
+| Disable ... when the charts symbol or period has been changed | ⬜ unticked | Same |
+| **Disable algorithmic trading via external Python API** | ⬜ **unticked** | ⚠️ **Critical** — this one breaks Python specifically |
+| Allow DLL imports | ⬜ not needed | Money Minter doesn't use DLLs |
+
+That fifth row is the one people miss. Ticked, it kills the Python connection
+even though the toolbar button is green.
+
+Then click the **Algo Trading** button in the top toolbar so it turns **green**.
 
 **Check:** the Algo Trading toolbar button is green, not grey/red.
 
-### Make sure your pairs exist
+### Make sure your pairs exist — this one catches almost everybody
 
-Open **Market Watch** (`Ctrl+M`), right-click inside it, choose **Show All**.
+A brand-new Exness demo opens with only **crypto** in Market Watch. Yours shows
+`BTCUSD`, `ETHUSD`, `XRPUSD`, `SOLUSD` and so on, and **no FX pairs at all**.
+Leave it like that and the first real command fails with `Symbol EUR/USD not
+found on this account`.
 
-**Check:** you can see `EURUSD`, `GBPUSD`, `USDJPY` in the list.
+Open **Market Watch** (`Ctrl+M`), right-click anywhere inside the symbol list,
+and choose **Show All**.
+
+**Check:** `EURUSD`, `GBPUSD`, `USDJPY` now appear in the list.
+
+> **Two traps here.** First, right-clicking the *list* is what matters — the
+> "Show All" item is not in the top menu bar. Second, note the exact spelling:
+> Exness usually appends a lowercase `m` (`EURUSDm`). Money Minter detects that
+> automatically, but the case matters to MetaTrader, so don't "fix" it by
+> hand.
 
 > **Note the exact names.** Exness usually appends an `m` (`EURUSDm`). Money
 > Minter auto-detects this — you don't need to do anything, but it's what you'll
