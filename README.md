@@ -39,6 +39,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **On an Android phone?** The robot cannot run on Android (MT5's mobile app has
+> no API) — but it makes an excellent dashboard. See **[ANDROID.md](ANDROID.md)**.
+
 > **On a Mac?** Follow **[MAC_SETUP.md](MAC_SETUP.md)** — a numbered walkthrough
 > from a fresh Mac to trading an Exness demo, including the Wine/`mt5_mac`
 > quirks that trip people up.

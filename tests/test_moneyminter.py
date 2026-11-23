@@ -275,3 +275,20 @@ def test_doctor_runs_and_reports_offline_mode(capsys):
     assert "Simulated demo session runs" in out
     # exit code is 2 when a driver is missing, 0 when everything is present
     assert code in (0, 2)
+
+
+def test_dashboard_has_phone_layout_rules():
+    """The dashboard is meant to be watched from a phone.
+
+    Without a sub-640px media query the fixed gutters, sticky header and
+    110px-minimum inputs overflow a 380px screen.
+    """
+    from pathlib import Path
+    css = (Path(__file__).resolve().parents[1]
+           / "moneyminter/web/static/style.css").read_text()
+    assert "@media(max-width:640px)" in css
+    assert "overflow-x:auto" in css          # wide tables scroll, not clip
+    assert "env(safe-area-inset-left)" in css
+    assert "width=device-width" in (
+        Path(__file__).resolve().parents[1]
+        / "moneyminter/web/templates/index.html").read_text()

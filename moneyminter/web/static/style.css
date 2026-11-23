@@ -82,3 +82,46 @@ td{padding:7px 8px;border-bottom:1px solid rgba(30,44,66,.5)}
 table.plain{margin-top:4px}
 .k-info,.k-warn{color:var(--muted)}
 .k-blocked{color:var(--gold)}
+
+/* ---------------------------------------------------------------- phones
+   The dashboard is meant to be watched from a phone while the bot runs
+   elsewhere. At 380px the fixed 26px gutters, the 110px-minimum inputs and
+   the sticky header's single flex row all squeeze content into unreadable
+   strips, so below 640px we tighten the chrome and let controls stack. */
+@media(max-width:640px){
+  header{padding:12px 14px;flex-wrap:wrap;gap:8px}
+  .brand{font-size:17px}
+  .brand small{display:block;margin:2px 0 0}
+  .status{font-size:11px;gap:6px;flex-wrap:wrap}
+  .controls{padding:12px 14px;gap:10px}
+  .controls label{flex:1 1 46%;min-width:0}
+  .controls label select,.controls label input{width:100%;min-width:0}
+  .chips{max-width:none;flex:1 1 100%}
+  .buttons{margin-left:0;flex:1 1 100%;flex-wrap:wrap}
+  .buttons button{flex:1 1 46%}
+  .kpis{padding:12px 14px;gap:8px;grid-template-columns:repeat(2,1fr)}
+  .kpi{padding:10px 12px}
+  .kpi b{font-size:17px}
+  .kpi span{font-size:10px}
+  .grid{padding:0 14px 14px;gap:10px}
+  .card{padding:12px}
+  /* wide tables are the main offender: let them scroll instead of overflowing */
+  .card table.plain,.findings table.plain{display:block;overflow-x:auto;white-space:nowrap}
+  .tabs{overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .tabs .tab{padding:8px 12px;font-size:12px}
+  .notice{font-size:12px;padding:10px 12px}
+  button{padding:11px 14px}            /* thumb-sized targets */
+  .chip{padding:8px 12px}
+}
+@media(max-width:400px){
+  .kpis{grid-template-columns:1fr 1fr}
+  .brand small{font-size:10px}
+}
+/* respect the notch / home indicator on modern phones */
+@supports(padding:max(0px)){
+  @media(max-width:640px){
+    header{padding-left:max(14px,env(safe-area-inset-left))}
+    .kpis,.grid,.controls{padding-left:max(14px,env(safe-area-inset-left));
+      padding-right:max(14px,env(safe-area-inset-right))}
+  }
+}
