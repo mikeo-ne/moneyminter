@@ -53,7 +53,10 @@ THRESHOLDS = {
     "min_median_pf": 1.30,        # profit factor across samples
     "min_trades": 60,             # total trades across all samples
     "max_worst_return_pct": -25.0,  # worst single sample may not blow up
-    "min_cost_survival": 0.60,    # pf at 2x spread vs 1x
+    "min_cost_survival": 0.60,
+    # pooled trades across all walk-forward folds; below this the out-of-sample
+    # result cannot be told apart from luck and is not allowed to gate anything
+    "min_oos_trades": 12,
     "max_mc_dd_pct": 35.0,        # 95th percentile Monte Carlo drawdown
 }
 
@@ -388,12 +391,33 @@ def _score(report: ValidationReport) -> None:
     else:
         score += 10
 
+    # Out-of-sample evidence carries the most weight, because it is the only
+    # part of this battery that is not measured on data the strategy was
+    # allowed to learn from. Walk-forward used to be worth 15 of 100, which let
+    # a strategy score 98.8 while every single fold lost money — precisely the
+    # overfitting this tool exists to catch.
     wf = report.walk_forward
+    wf_wins = 0
+    oos_trades = 0
+    oos_net = 0.0
     if wf:
-        wins = sum(1 for w in wf if w["return_pct"] > 0)
-        score += 15 * (wins / len(wf))
-        if wins < len(wf):
-            reasons.append(f"{len(wf) - wins}/{len(wf)} walk-forward folds lost money")
+        wf_wins = sum(1 for w in wf if w["return_pct"] > 0)
+        # Pool the folds rather than counting how many were profitable. With
+        # short test slices each fold holds 2-4 trades, so "3 of 4 folds up" is
+        # a coin flip dressed as evidence. The pooled out-of-sample result is
+        # the only thing with enough trades to mean something.
+        oos_trades = sum(int(w.get("trades", 0)) for w in wf)
+        oos_net = sum(float(w.get("net_profit", 0.0)) for w in wf)
+        score += 25 * min(1.0, max(0.0, (wf_wins / len(wf)) * 0.5
+                                       + (0.5 if oos_net > 0 else 0.0)))
+        if wf_wins < len(wf):
+            reasons.append(f"{len(wf) - wf_wins}/{len(wf)} walk-forward folds lost money")
+        if oos_trades < t["min_oos_trades"]:
+            reasons.append(f"only {oos_trades} out-of-sample trades across "
+                           f"{len(wf)} folds (need {t['min_oos_trades']} to judge)")
+        elif oos_net <= 0:
+            reasons.append(f"out-of-sample result is negative "
+                           f"({oos_net:+.2f}) over {oos_trades} trades")
     else:
         reasons.append("no walk-forward evidence")
 
@@ -424,7 +448,29 @@ def _score(report: ValidationReport) -> None:
         and report.total_trades >= t["min_trades"]
         and worst >= t["max_worst_return_pct"]
     )
-    if score >= 82 and passes_minimum:
+    # Gates, not points. Each of these is disqualifying on its own: a high
+    # in-sample score cannot buy its way past absent out-of-sample evidence,
+    # spreads that eat the edge, or a worst case the plan cannot survive.
+    gate_reasons = []
+    if not wf:
+        gate_reasons.append("no walk-forward evidence, so there is nothing out of sample")
+    elif oos_trades < t["min_oos_trades"]:
+        gate_reasons.append(
+            f"only {oos_trades} out-of-sample trades — too few to distinguish skill "
+            "from noise, however good the in-sample numbers look")
+    elif oos_net <= 0:
+        gate_reasons.append(
+            f"out of sample the strategy lost {oos_net:+.2f} over {oos_trades} trades "
+            "— the in-sample edge did not survive")
+    if not cs or cs["survival"] < t["min_cost_survival"]:
+        gate_reasons.append("the edge does not survive a realistic spread")
+    if worst < t["max_worst_return_pct"]:
+        gate_reasons.append(f"worst sample {worst:+.1f}% exceeds the drawdown budget")
+
+    if gate_reasons:
+        report.verdict = "rejected"
+        reasons.extend(r for r in gate_reasons if r not in reasons)
+    elif score >= 82 and passes_minimum:
         report.verdict = "validated"
     elif score >= 58 and pf > 1.05:
         report.verdict = "promising"

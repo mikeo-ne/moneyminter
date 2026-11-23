@@ -108,14 +108,47 @@ def test_validator_detects_a_real_edge():
     assert edge.profitable_pct > noise.profitable_pct
 
 
-def test_score_rises_monotonically_with_edge_strength():
-    """A validator that cannot rank two edges is not measuring anything."""
-    def mk(a):
-        return lambda s, sd: SyntheticFeed(s, "H1", bars=1800, seed=sd, autocorr=a)
+def test_validator_rejects_when_out_of_sample_evidence_is_absent():
+    """A high in-sample score must not buy a pass.
 
-    scores = [validate("donchian_trend", samples=4, bars=1500, mc_runs=150,
-                       feed_factory=mk(a)).score for a in (0.0, 0.3, 0.5)]
-    assert scores[0] <= scores[1] < scores[2], f"not monotonic: {scores}"
+    Regression: with this exact setup the validator returned 98.8/100 and
+    'validated' while all four walk-forward folds lost money. Walk-forward was
+    worth 15 of 100 points and was not a gate, so overfitting scored well.
+    """
+    scores = []
+    for a in (0.0, 0.3, 0.5):
+        r = validate("donchian_trend", samples=4, bars=1500, mc_runs=150,
+                     feed_factory=lambda s, sd, a=a: SyntheticFeed(
+                         s, "H1", bars=1800, seed=sd, autocorr=a))
+        scores.append(r.score)
+        assert r.verdict == "rejected", (
+            f"autocorr={a} scored {r.score} -> {r.verdict} but the pooled "
+            "out-of-sample result is negative; it must not be validated")
+        assert any("out-of-sample" in reason or "out of sample" in reason
+                   for reason in r.reasons), r.reasons
+    # noise must never out-score a real edge
+    assert scores[0] <= scores[-1]
+
+
+def test_folds_too_thin_to_judge_are_rejected_as_unproven():
+    """2-4 trades per fold is a coin flip, not evidence."""
+    r = validate("donchian_trend", samples=4, bars=1500, mc_runs=150)
+    oos = sum(w["trades"] for w in r.walk_forward)
+    if oos < 12:                      # this short series cannot prove anything
+        assert r.verdict == "rejected"
+        assert any("out-of-sample trades" in reason or "only" in reason
+                   for reason in r.reasons)
+
+
+def test_validator_says_yes_when_a_real_edge_has_enough_evidence():
+    """The gate must be capable of passing, or it is just a 'no' machine."""
+    r = validate("donchian_trend", samples=6, bars=4000, mc_runs=200,
+                 feed_factory=lambda s, sd: SyntheticFeed(
+                     s, "H1", bars=4600, seed=sd, autocorr=0.7))
+    oos = sum(w["trades"] for w in r.walk_forward)
+    assert oos >= 12, "test setup should produce enough out-of-sample trades"
+    assert r.verdict == "validated", f"scored {r.score} with oos net " \
+        f"{sum(w['net_profit'] for w in r.walk_forward):+.1f}"
 
 
 def test_report_exposes_the_numbers_behind_the_verdict():

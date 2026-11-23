@@ -210,25 +210,38 @@ vibes:
    independent price paths and symbols? Reported as the share profitable and the
    **worst** case, not the average.
 2. **Walk-forward** — parameters fitted on slice *n* must survive slice *n+1*.
+   The folds are **pooled**, not counted: two to four trades per fold is a coin
+   flip, so a run whose out-of-sample total is under 12 trades cannot be judged
+   and is rejected as unproven rather than lucky.
 3. **Monte Carlo on trade order** — reshuffles trades to expose path dependence;
    reports the 5th-percentile outcome, 95th-percentile drawdown, risk of ruin.
 4. **Cost sensitivity** — doubles the spread. An edge that evaporates is spread
    noise, not edge.
 5. **Sample sufficiency** — fewer than 60 trades proves nothing.
 
-`VALIDATED` requires ≥70% of samples profitable, median PF ≥ 1.3, ≥60 trades,
-walk-forward folds holding up, ≥60% spread survival, and Monte Carlo drawdown
-under the plan. It is deliberately hard to reach.
+`VALIDATED` requires, as **gates that no in-sample score can buy past**:
 
-Two self-tests keep the validator honest:
+* ≥12 pooled out-of-sample trades, and positive out-of-sample P&L
+* ≥60% spread survival (the edge must not be spread noise)
+* worst sample inside the drawdown budget
+
+and, as scoring components: ≥70% of samples profitable, median PF ≥ 1.3, ≥60
+trades, consistent folds and Monte Carlo drawdown under the plan. It is
+deliberately hard to reach.
+
+Three self-tests keep the validator honest:
 
 * `test_null_strategy_is_rejected_on_noise` — a trend follower on random data
   must **not** pass.
-* `test_score_rises_monotonically_with_edge_strength` — injecting genuine serial
-  correlation must raise the score monotonically (33.8 → 38.6 → 98.8 in the
-  reference run).
+* `test_validator_rejects_when_out_of_sample_evidence_is_absent` — an earlier
+  version scored 98.8/100 and said `VALIDATED` while all four folds lost money.
+  Out-of-sample evidence is now worth 25 points *and* a gate.
+* `test_validator_says_yes_when_a_real_edge_has_enough_evidence` — with genuine
+  serial correlation and enough trades it must reach `VALIDATED`. A gate that
+  can never open is just a "no" machine.
 
-A validator that passes everything is worse than none.
+A validator that passes everything is worse than none, and so is one that
+passes nothing.
 
 ---
 
