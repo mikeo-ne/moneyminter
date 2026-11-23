@@ -33,6 +33,9 @@ with three backends — pick the row that matches your machine:
 Money Minter auto-detects, so usually you don't pass anything. Jump to
 [§0a macOS](#0a-macos) or [§0b Linux](#0b-linux), then continue at §1.
 
+> **macOS users:** there is a complete numbered walkthrough in
+> **[MAC_SETUP.md](MAC_SETUP.md)**. The summary below is the short version.
+
 ### 0a. macOS
 
 MetaTrader ships a macOS build that is really the Windows binary inside a bundled Wine
@@ -49,6 +52,17 @@ Then use the normal commands — add `--mt5-backend mac` if auto-detection picks
 ```bash
 python -m moneyminter connect --symbols EUR/USD --mt5-backend mac
 ```
+
+Money Minter handles the two macOS bridge quirks for you:
+
+* `mt5_mac` reports success as `RES_E_SUCCESS` rather than `TRADE_RETCODE_DONE`,
+  so the adapter accepts either — otherwise every successful fill would look like
+  a rejection and the robot would silently never trade.
+* MT5 stamps bars with the **broker's** server clock, and the macOS bridge can
+  label that as UTC (so a UTC+2 broker yields bars two hours in the future). The
+  adapter measures the skew against the newest bar and shifts bars onto UTC when
+  the feed is live, logging a `broker clock` warning. Stale/replayed history is
+  left alone rather than being "corrected" into the future.
 
 If that proves flaky (Wine on Apple Silicon can be), use the Docker bridge instead:
 

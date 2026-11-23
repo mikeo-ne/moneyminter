@@ -312,3 +312,100 @@ def test_order_rejection_is_reported(mt5):
     m.order_send = lambda r: mock_mt5._Result(10019, comment="No money")
     with pytest.raises(MT5Error, match="10019"):
         b.open("EUR/USD", Side.BUY, 100_000)
+
+
+# ------------------------------------------------------ macOS bridge quirks
+def test_mt5_mac_style_success_retcode_is_accepted(mt5):
+    """mt5_mac reports RES_E_SUCCESS, not TRADE_RETCODE_DONE.
+
+    Without the fallback every successful fill on macOS looks like a rejection
+    and the robot silently never trades.
+    """
+    m = mt5()
+    real_send = m.order_send
+
+    def mac_style_send(req):
+        # the mock normally compares against TRADE_RETCODE_DONE, which this
+        # backend does not have, so shim it locally
+        m.TRADE_RETCODE_DONE = 10009
+        try:
+            return real_send(req)
+        finally:
+            del m.TRADE_RETCODE_DONE
+
+    del m.TRADE_RETCODE_DONE               # this backend does not define it
+    m.RES_E_SUCCESS = 10009
+    m.order_send = mac_style_send
+    from moneyminter.live import MT5Broker
+    b = MT5Broker()
+    p = b.open("EUR/USD", Side.BUY, 100_000)
+    assert p is not None and p.id in b.positions
+
+
+def test_contest_account_is_treated_as_demo(mt5):
+    """trade_mode 1 is CONTEST, not real money — it must not be refused."""
+    m = mt5(trade_mode=1, balance=10_000)
+    m.ACCOUNT_TRADE_MODE_CONTEST = 1
+    from moneyminter.live import MT5Broker
+    assert MT5Broker().is_demo is True
+
+
+def test_unreadable_trade_mode_fails_safe_as_live(mt5):
+    """If a backend cannot tell us the account type, assume real money."""
+    import types
+
+    m = mt5()
+    acct = types.SimpleNamespace(
+        login=123456, server="Exness-MT5Trial", name="T", currency="USD",
+        balance=10_000.0, equity=10_000.0, margin=0.0, margin_free=10_000.0,
+        leverage=2000)                      # note: no trade_mode attribute
+    m.account_info = lambda: acct
+    from moneyminter.live import MT5Broker, MT5Error
+    with pytest.raises(MT5Error, match="Refusing to trade LIVE"):
+        MT5Broker()
+
+
+def test_broker_clock_skew_is_corrected_onto_utc(mt5):
+    """A UTC+2 broker clock must not leak into strategy/journal timestamps."""
+    import numpy as np
+    import time as _time
+
+    m = mt5()
+    now = int(_time.time()) // 300 * 300
+    base = np.linspace(1.09, 1.11, 100)
+
+    def rates(name, tf, start, count):
+        skew = 7200                                  # broker is UTC+2
+        return np.array(
+            [(now - (count - i) * 300 + skew, base[i], base[i] + 0.0006,
+              base[i] - 0.0006, base[i], 500, 2, 0) for i in range(count)],
+            dtype=[("time", "<i8"), ("open", "<f8"), ("high", "<f8"), ("low", "<f8"),
+                   ("close", "<f8"), ("tick_volume", "<u8"), ("spread", "<i4"),
+                   ("real_volume", "<u8")])
+    m.copy_rates_from_pos = rates
+    from moneyminter.live import MT5Broker
+    b = MT5Broker()
+    assert b._clock_offset_s == -7200            # shift bars back onto UTC
+    df = b.candles("EUR/USD", "M5", 50)
+    newest = df.index[-1].timestamp()
+    assert abs(newest - _time.time()) < 3600, "bars should be near real time again"
+
+
+def test_stale_history_is_not_mistaken_for_clock_skew(mt5):
+    """A feed replaying old history must not be 'corrected' into the future."""
+    import numpy as np
+
+    m = mt5()
+    old = 1_600_000_000                          # long in the past
+
+    def rates(name, tf, start, count):
+        base = np.linspace(1.09, 1.11, count)
+        return np.array(
+            [(old + i * 300, base[i], base[i] + 0.0006, base[i] - 0.0006,
+              base[i], 500, 2, 0) for i in range(count)],
+            dtype=[("time", "<i8"), ("open", "<f8"), ("high", "<f8"), ("low", "<f8"),
+                   ("close", "<f8"), ("tick_volume", "<u8"), ("spread", "<i4"),
+                   ("real_volume", "<u8")])
+    m.copy_rates_from_pos = rates
+    from moneyminter.live import MT5Broker
+    assert MT5Broker()._clock_offset_s == 0

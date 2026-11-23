@@ -215,8 +215,14 @@ class LiveTrader:
         equity = self.broker.equity()
         self.risk.update_equity(equity, now.date())
 
-        self._reconcile(now)
+        # Read the terminal's positions EXACTLY ONCE per cycle.
+        # ``broker.positions`` compares the current set against the previous
+        # read to spot tickets the broker closed. Calling it twice per cycle
+        # made the second call see an empty "vanished" set, so reconciliation
+        # never learned which position had been stopped out — and the trade was
+        # recorded with no side, no stop and no entry price.
         live_positions = self.broker.positions
+        self._reconcile(now, live_positions)
         if not live_positions:
             # bank equity points while flat so the curve reflects realised P&L
             self.equity_history.append((now, equity))
@@ -249,9 +255,10 @@ class LiveTrader:
             self._emit("error", e)
 
     # ------------------------------------------------------------------
-    def _reconcile(self, now: datetime) -> None:
+    def _reconcile(self, now: datetime, live: Optional[Dict[str, Position]] = None) -> None:
         """Detect positions the broker closed (SL/TP) or a human closed."""
-        live = self.broker.positions
+        if live is None:
+            live = self.broker.positions
         current = set(live.keys())
         vanished = set(self.broker.drain_vanished()) | (self._known_tickets - current)
         for ticket in sorted(vanished):
@@ -418,6 +425,11 @@ class LiveTrader:
             if p:
                 self._known_tickets.add(p.id)
                 self._ticket_symbols[p.id] = symbol
+                # Cache the details NOW. A position can be opened and stopped
+                # out by the broker between two position snapshots, in which
+                # case it never appears in one and reconciliation would have
+                # nothing to rebuild the trade from.
+                self._open_positions[p.id] = p
                 self._emit("open", f"Opened {symbol} {p.side.value} "
                                    f"{self.broker.units_to_lots(symbol, p.units)} lots @ "
                                    f"{p.entry_price:.5f} SL {signal.stop_loss} "

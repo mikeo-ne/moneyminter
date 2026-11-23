@@ -139,6 +139,8 @@ class MT5Broker(Broker):
         self._seen_tickets: set[str] = set()
         self._vanished: set[str] = set()
         self.rejected: List[dict] = []
+        self._clock_offset_s: int = 0
+        self.symbol_cache_probe: str = "EUR/USD"
         self.trades: List[Trade] = []
         #: broker symbol name -> requested "EUR/USD", so records are consistent
         self._display_symbols: Dict[str, str] = {}
@@ -158,11 +160,15 @@ class MT5Broker(Broker):
         if info is None:
             raise MT5Error(f"Could not read account info: {self.mt5.last_error()}")
         self.account = info
-        self.is_demo = info.trade_mode == self.mt5.ACCOUNT_TRADE_MODE_DEMO
+        # trade_mode 0 = DEMO, 1 = CONTEST, 2 = REAL. Anything we cannot read
+        # is treated as LIVE, which fails safe.
+        mode = getattr(info, "trade_mode", None)
+        self.is_demo = mode in self._demo_modes() if mode is not None else False
         self.initial_balance = float(info.balance)
         self.currency = info.currency
 
         self._guard_account()
+        self._detect_clock_offset()
         log.info("Connected to %s account #%s (%s) balance %.2f %s",
                  "DEMO" if self.is_demo else "LIVE", info.login, info.server,
                  info.balance, info.currency)
@@ -239,9 +245,70 @@ class MT5Broker(Broker):
         if rates is None or len(rates) == 0:
             raise MT5Error(f"No history for {symbol} {timeframe}: {self.mt5.last_error()}")
         df = pd.DataFrame(rates)
-        df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        stamps = pd.to_datetime(df["time"], unit="s", utc=True)
+        df["timestamp"] = self._align_bar_clock(stamps)
         df = df.set_index("timestamp").rename(columns={"tick_volume": "volume"})
         return df[["open", "high", "low", "close", "volume"]].astype(float)
+
+    #: how far a broker clock may sit from real UTC before we correct for it
+    _MAX_CLOCK_SKEW_S = 3600
+
+    def _align_bar_clock(self, stamps: pd.DatetimeIndex) -> pd.DatetimeIndex:
+        """Shift bars onto the strategy's UTC clock when the broker disagrees.
+
+        MT5 timestamps bars with the *broker's* server clock. Some bridges
+        (notably the macOS/Wine ones) hand that back labelled as UTC, so a
+        UTC+2 broker produces bars two hours in the future. Strategies only
+        look at relative bar order so measurement survives, but a clock-skewed
+        feed breaks session logic (``session_breakout``) and makes the journal
+        timestamps lie.
+
+        We correct only when the skew is large enough to be a real offset rather
+        than network latency, and we log it once so it is visible rather than
+        silent.
+        """
+        if len(stamps) == 0 or self._clock_offset_s == 0:
+            return stamps
+        return stamps + pd.Timedelta(seconds=self._clock_offset_s)
+
+    def _detect_clock_offset(self) -> None:
+        """Compare the newest bar's timestamp with real time and cache the skew.
+
+        Only *current* bars are trusted. A feed that replays history from a
+        fixed start point (the simulator does this) produces bars that are days
+        or weeks old, and treating that as a clock offset would corrupt a
+        perfectly good timestamp sequence. So we require the newest bar to be
+        within a plausible live window of now, and otherwise leave the clock
+        alone.
+        """
+        self._clock_offset_s = 0
+        try:
+            import numpy as _np
+            tf = getattr(self.mt5, _TF.get("M5"), None)
+            sym = self.resolve_symbol(self.symbol_cache_probe)
+            if tf is None or sym is None:
+                return
+            rates = self.mt5.copy_rates_from_pos(sym, tf, 0, 1)
+            if rates is None or len(rates) == 0:
+                return
+            newest = float(_np.asarray(rates)[0]["time"])
+            skew = newest - time.time()
+            # a live bar is at most one bar-interval old; anything else means
+            # this feed is not tracking wall-clock time and must not be shifted
+            live_window = 3 * 3600
+            if skew > live_window or skew < -live_window:
+                log.debug("bar clock not live (skew %.0fs) — leaving timestamps as-is",
+                          skew)
+                return
+            if abs(skew) > self._MAX_CLOCK_SKEW_S:
+                # round to the nearest half hour: FX server offsets are UTC+2,
+                # UTC+3, UTC-4 etc, not arbitrary seconds
+                self._clock_offset_s = int(round(-skew / 1800.0) * 1800)
+                log.warning("MT5 bars are on the broker clock (%+.1f h from UTC); "
+                            "shifting them onto UTC for strategy and journal use",
+                            -self._clock_offset_s / 3600.0)
+        except Exception as exc:  # noqa: BLE001 - never fail on a nicety
+            log.debug("clock offset detection skipped: %s", exc)
 
     # ------------------------------------------------------------ sizing
     def units_to_lots(self, symbol: str, units: float) -> float:
@@ -278,11 +345,15 @@ class MT5Broker(Broker):
             result = self.mt5.order_send(request)
             if result is None:
                 raise MT5Error(f"order_send returned None: {self.mt5.last_error()}")
-            if result.retcode == self.mt5.TRADE_RETCODE_DONE:
+            if result.retcode == self._retcode_done():
                 return result
             # requote / price-changed are worth retrying with a fresh price
-            if result.retcode in (self.mt5.TRADE_RETCODE_REQUOTE,
-                                  self.mt5.TRADE_RETCODE_PRICE_CHANGED) and attempt < 2:
+            requote_codes = {10004, 10020}   # REQUOTE, PRICE_CHANGED
+            for attr in ("TRADE_RETCODE_REQUOTE", "TRADE_RETCODE_PRICE_CHANGED"):
+                val = getattr(self.mt5, attr, None)
+                if isinstance(val, int):
+                    requote_codes.add(val)
+            if result.retcode in requote_codes and attempt < 2:
                 time.sleep(0.4)
                 tick = self.mt5.symbol_info_tick(request["symbol"])
                 if request["type"] == self.mt5.ORDER_TYPE_BUY:
@@ -344,6 +415,31 @@ class MT5Broker(Broker):
         log.info("OPEN %s %s %.2f lots @ %.5f (ticket %s)", broker_sym, side.value,
                  lots, pos.entry_price, result.order)
         return pos
+
+    def _retcode_done(self) -> int:
+        """The retcode that means "filled", per backend.
+
+        The official ``MetaTrader5`` package exposes ``TRADE_RETCODE_DONE``
+        (10009). ``mt5_mac`` — the macOS wrapper — exposes ``RES_E_SUCCESS``
+        instead, and some other bridges name it differently again. Without this
+        fallback a *successful* fill looks like a rejection on macOS, which
+        would silently stop the robot from ever trading.
+        """
+        for attr in ("TRADE_RETCODE_DONE", "RES_E_SUCCESS", "TRADE_RETCODE_PLACED"):
+            val = getattr(self.mt5, attr, None)
+            if isinstance(val, int):
+                return val
+        log.warning("No success retcode found on the MT5 backend; assuming 10009")
+        return 10009
+
+    def _demo_modes(self) -> tuple:
+        """Account trade_mode values that mean demo/contest, per backend."""
+        modes = []
+        for attr in ("ACCOUNT_TRADE_MODE_DEMO", "ACCOUNT_TRADE_MODE_CONTEST"):
+            val = getattr(self.mt5, attr, None)
+            if isinstance(val, int):
+                modes.append(val)
+        return tuple(modes) if modes else (0, 1)
 
     def _filling_mode(self, spec):
         """Pick a fill policy the symbol actually supports (brokers differ)."""
