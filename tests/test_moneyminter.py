@@ -263,3 +263,15 @@ def test_web_report_is_json_safe_with_infinite_profit_factor():
                                           "bars": 900, "seed": 4})
         assert r.status_code == 200
         json.dumps(r.json())            # must not raise on inf/nan
+
+
+# ------------------------------------------------------------------ doctor
+def test_doctor_runs_and_reports_offline_mode(capsys):
+    """`doctor` must be runnable anywhere and never crash on a missing broker."""
+    from moneyminter.cli import main
+    code = main(["doctor"])
+    out = capsys.readouterr().out
+    assert "Python drivers" in out and "Offline mode" in out
+    assert "Simulated demo session runs" in out
+    # exit code is 2 when a driver is missing, 0 when everything is present
+    assert code in (0, 2)

@@ -316,6 +316,97 @@ def cmd_connect(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """Check every prerequisite for connecting to MetaTrader 5, one by one."""
+    import importlib
+    import shutil
+    import sys as _sys
+
+    print(BANNER)
+    ok = True
+
+    def line(good: bool, label: str, detail: str = "") -> None:
+        nonlocal ok
+        if not good:
+            ok = False
+        mark = "✓" if good else "✗"
+        print(f"  {mark} {label}" + (f"  {detail}" if detail else ""))
+
+    print("Environment")
+    line(True, "Platform", f"{_sys.platform} ({_sys.platform == 'darwin' and 'macOS' or 'not macOS'})")
+    line(_sys.version_info >= (3, 10), "Python",
+         f"{_sys.version.split()[0]} (3.10+ required)")
+    line(True, "Interpreter", _sys.executable)
+    if not _sys.prefix.endswith(".venv") and "venv" not in _sys.prefix:
+        print("    note: not inside a virtualenv — consider 'source .venv/bin/activate'")
+
+    print("\nMetaTrader 5 terminal")
+    if _sys.platform == "darwin":
+        from .live.mt5_broker import find_mac_mt5_app
+        app = find_mac_mt5_app()
+        if app:
+            line(True, "MetaTrader 5.app", app)
+        else:
+            line(False, "MetaTrader 5.app", "NOT FOUND")
+            print("      Looked in /Applications and ~/Applications.")
+            print("      List what you have:  ls /Applications | grep -i meta")
+            print("      Then:  export MT5_APP=\"/Applications/<exact name>.app\"")
+    else:
+        app = None
+        line(True, "Platform check", "macOS-specific checks skipped")
+
+    print("\nPython drivers")
+    for mod, label, hint in (
+        ("MetaTrader5", "MetaTrader5 (official, Windows only)", "pip install MetaTrader5"),
+        ("mt5_mac", "mt5_mac (macOS bridge)", "pip install mt5_mac"),
+        ("rpyc", "rpyc (remote bridge)", "pip install rpyc"),
+    ):
+        try:
+            m = importlib.import_module(mod)
+            ver = getattr(m, "__version__", "")
+            line(True, label, f"{mod} {ver}".strip())
+        except ImportError:
+            line(False, label, f"not installed — {hint}")
+
+    print("\nBackend selection")
+    try:
+        from .live.mt5_broker import _import_mt5
+        backend = getattr(args, "mt5_backend", "auto")
+        mt5 = _import_mt5(host=getattr(args, "mt5_host", None),
+                          port=getattr(args, "mt5_port", 18812),
+                          backend=backend)
+        line(True, "A backend is available", f"{getattr(mt5, '__name__', '?')} (--mt5-backend {backend})")
+    except Exception as exc:  # noqa: BLE001
+        line(False, "No backend available")
+        print("      " + str(exc).replace("\n", "\n      "))
+
+    print("\nOffline mode (works without any broker)")
+    try:
+        from .live import LiveTrader, LiveConfig
+        from .live.sim_terminal import install as _sim_install
+        from . import RiskConfig
+        _sim_install(symbols=["EUR/USD"], timeframe="M5", bars=800)
+        t = LiveTrader(LiveConfig(symbols=["EUR/USD"], timeframe="M5", sim=True,
+                                  history_bars=300, journal_path=None,
+                                  risk=RiskConfig(risk_per_trade=0.0025)))
+        for _ in range(2500):
+            t.poll()
+        st = t.state()["stats"]
+        line(st["trades"] > 0, "Simulated demo session runs",
+             f"{st['trades']} trades opened/closed, equity "
+             f"{t.broker.equity():,.2f}")
+    except Exception as exc:  # noqa: BLE001
+        line(False, "Simulated demo session FAILED", str(exc)[:160])
+
+    print()
+    if ok:
+        print("Everything needed for a demo run is present.")
+        print("Next:  python -m moneyminter connect --symbols EURUSD GBPUSD")
+    else:
+        print("Fix the ✗ items above, then re-run:  python -m moneyminter doctor")
+    return 0 if ok else 2
+
+
 def cmd_live(args) -> int:
     from .live import LiveTrader, MT5Error
 
@@ -483,6 +574,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--no-trail", action="store_true",
                         help="do not push trailing stops to the broker")
         sp.add_argument("--journal", help="append events to this JSONL file")
+
+    dr = sub.add_parser("doctor", help="check MT5 prerequisites and diagnose setup problems")
+    live_flags(dr)
+    dr.set_defaults(func=cmd_doctor, symbols=["EUR/USD"], timeframe="M5",
+                    strategy="trend_pullback", risk=0.0025)
 
     cn = sub.add_parser("connect", help="test the MT5/Exness connection (sends no orders)")
     common(cn, symbols=True)

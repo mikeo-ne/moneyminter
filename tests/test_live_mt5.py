@@ -434,3 +434,70 @@ def test_symbol_scan_prefers_fx_over_lookalike_crypto(mt5):
     m.symbols_get = lambda: [_Info("EURUSDT"), _Info("EURUSDm")]
     b2 = MT5Broker()
     assert b2.resolve_symbol("EUR/USD") == "EURUSDm"
+
+
+# ------------------------------------------- macOS .app discovery (mt5_mac)
+def _fake_app(root, name, with_wine=True):
+    import os
+    app = os.path.join(root, name)
+    os.makedirs(os.path.join(app, "Contents", "SharedSupport", "wine", "bin"), exist_ok=True)
+    return app
+
+
+def test_mac_app_found_under_broker_branded_name(tmp_path, monkeypatch):
+    """Exness/broker-branded installs are not 'MetaTrader 5.app'.
+
+    mt5_mac hard-codes that exact path, so a perfectly working branded install
+    reports "not found" while it is open on screen.
+    """
+    import moneyminter.live.mt5_broker as mb
+    app = _fake_app(str(tmp_path), "MetaTrader 5 (Exness).app")
+    monkeypatch.delenv("MT5_APP", raising=False)
+    monkeypatch.setattr(mb, "_MAC_APP_SEARCH_DIRS", (str(tmp_path),))
+    assert mb.find_mac_mt5_app() == app
+
+
+def test_mac_app_prefers_the_canonical_bundle(tmp_path, monkeypatch):
+    import moneyminter.live.mt5_broker as mb
+    _fake_app(str(tmp_path), "MetaTrader 5 (Exness).app")
+    canon = _fake_app(str(tmp_path), "MetaTrader 5.app")
+    monkeypatch.delenv("MT5_APP", raising=False)
+    monkeypatch.setattr(mb, "_MAC_APP_SEARCH_DIRS", (str(tmp_path),))
+    assert mb.find_mac_mt5_app() == canon
+
+
+def test_mac_app_env_override_wins(tmp_path, monkeypatch):
+    import moneyminter.live.mt5_broker as mb
+    app = _fake_app(str(tmp_path), "Something Odd.app")
+    monkeypatch.setenv("MT5_APP", app)
+    assert mb.find_mac_mt5_app() == app
+
+
+def test_mac_app_missing_gives_actionable_message(tmp_path, monkeypatch):
+    import pytest
+    import moneyminter.live.mt5_broker as mb
+    monkeypatch.delenv("MT5_APP", raising=False)
+    monkeypatch.setattr(mb, "_MAC_APP_SEARCH_DIRS", (str(tmp_path),))
+    monkeypatch.setattr(mb, "_MAC_APP_CANDIDATES", ())
+    monkeypatch.setattr(mb.sys, "platform", "darwin")
+    with pytest.raises(mb.MT5Error, match="MT5_APP"):
+        mb._preflight_mac_backend("mac")
+
+
+def test_non_bundle_directory_named_app_is_ignored(tmp_path, monkeypatch):
+    """A stray Foo.app without the Wine runtime must not be picked up."""
+    import os
+    import moneyminter.live.mt5_broker as mb
+    os.makedirs(os.path.join(tmp_path, "MetaTrader Backup.app"), exist_ok=True)
+    monkeypatch.delenv("MT5_APP", raising=False)
+    monkeypatch.setattr(mb, "_MAC_APP_SEARCH_DIRS", (str(tmp_path),))
+    monkeypatch.setattr(mb, "_MAC_APP_CANDIDATES", ())
+    assert mb.find_mac_mt5_app() is None
+
+
+def test_bootstrap_error_is_translated_into_a_fix(monkeypatch):
+    """The raw mt5_mac BootstrapError must not reach the user unexplained."""
+    import moneyminter.live.mt5_broker as mb
+    msg = mb._explain_init_failure(Exception(
+        "MetaTrader 5.app not found at /Applications/MetaTrader 5.app."))
+    assert "MT5_APP" in msg and "ls /Applications" in msg

@@ -229,11 +229,43 @@ expected — the simulated price feed has no exploitable edge by design.
 
 ```bash
 pip install mt5_mac
+python -m moneyminter doctor
 ```
 
-> `mt5_mac` drives the Wine-based Python inside `MetaTrader 5.app`. On first use
-> it downloads a small (~8 MB) Windows Python into MT5's Wine prefix, so give it
-> a minute.
+`doctor` checks every prerequisite in one shot — Python version, the `.app`
+location, the drivers, the backend, and an offline trading session. Run it
+whenever something looks wrong; it tells you which specific thing to fix.
+
+> **If you see `mt5_mac.bootstrap.BootstrapError: MetaTrader 5.app not found at
+> /Applications/MetaTrader 5.app`** — this is the single most common macOS
+> failure, and it does **not** mean MT5 is missing. `mt5_mac` hard-codes that
+> exact path, and the Exness installer writes `MetaTrader 5 (Exness).app`
+> instead, so the check fails even though MT5 is open on your screen.
+
+Find the real name:
+
+```bash
+ls /Applications | grep -i meta
+```
+
+Then either tell Money Minter where it is (recommended):
+
+```bash
+export MT5_APP="/Applications/MetaTrader 5 (Exness).app"
+```
+
+…or make a link with the name the bridge insists on:
+
+```bash
+ln -s "/Applications/MetaTrader 5 (Exness).app" "/Applications/MetaTrader 5.app"
+```
+
+Money Minter now searches `/Applications` and `~/Applications` for any
+`*MetaTrader*.app` bundle by itself, so a branded install usually just works —
+`MT5_APP` is the override for anything unusual (external drive, renamed bundle).
+
+> On first use `mt5_mac` downloads a small (~8 MB) Windows Python into MT5's Wine
+> environment, so give it a minute. It only happens once.
 
 **MetaTrader 5 must be running and logged in** — this talks to it, it is not a
 standalone connection.
@@ -394,7 +426,9 @@ regardless of how good the equity curve looks.
 | Symptom | Fix |
 |---|---|
 | `No MetaTrader 5 backend available` | Run `pip install mt5_mac` inside the activated venv, then retry |
-| `MetaTrader 5.app not found` | MT5 must be in `/Applications`, installed from metatrader5.com |
+| `BootstrapError: MetaTrader 5.app not found` | Not actually missing — see Step 5. Run `ls /Applications \| grep -i meta` then `export MT5_APP="..."` |
+| `No module named mt5_mac` | `pip install mt5_mac` in the activated venv |
+| Lost / can't tell what's wrong | `python -m moneyminter doctor` |
 | `initialize() failed` | MT5 not running, or not logged in. Launch it manually first |
 | `Algo Trading is disabled` | Toolbar button green **and** Tools → Options → Expert Advisors ticked |
 | `Symbol EURUSD not found` | Market Watch (`Ctrl+M`) → right-click → **Show All** |
@@ -416,6 +450,7 @@ regardless of how good the equity curve looks.
 ```bash
 cd ~/moneyminter && source .venv/bin/activate     # every new Terminal window
 
+python -m moneyminter doctor                      # diagnose setup, run this when stuck
 python -m moneyminter strategies                  # what's available
 python -m moneyminter demo --symbols EUR/USD      # no broker needed — run this first
 python -m moneyminter connect --symbols EURUSD    # verify the MT5 link, no orders

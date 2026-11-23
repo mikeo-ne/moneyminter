@@ -18,6 +18,8 @@ That makes it impossible to point this at a funded live account by accident.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import math
 import time
 from datetime import datetime, timezone
@@ -42,6 +44,126 @@ _SUFFIXES = ["", "m", "z", "c", ".", "_", "micro", ".a", "-ECN", "ecn", "pro", "
 
 class MT5Error(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------- macOS app
+#: where MT5 for macOS usually ends up, across installer versions
+_MAC_APP_CANDIDATES = (
+    "/Applications/MetaTrader 5.app",
+    "/Applications/MetaTrader 5 (Exness).app",
+    "/Applications/MetaTrader 5 (Exness Technologies Ltd).app",
+    "/Applications/Exness MetaTrader 5.app",
+    "/Applications/MetaTrader5.app",
+)
+_MAC_APP_SEARCH_DIRS = ("/Applications", os.path.expanduser("~/Applications"))
+
+
+def find_mac_mt5_app() -> Optional[str]:
+    """Return the path of MetaTrader 5.app on macOS, or None.
+
+    ``mt5_mac`` hard-codes ``/Applications/MetaTrader 5.app``. Broker-branded
+    installers (Exness, XM, IC Markets ...) write a differently-named bundle,
+    and the app also lands in ``~/Applications`` when dropped there instead of
+    dragged onto /Applications. Both cases fail with a misleading
+    "MetaTrader 5.app not found" even though it is plainly open on screen.
+    """
+    env = os.getenv("MT5_APP") or os.getenv("MT5_MAC_APP")
+    if env:
+        return env if os.path.isdir(env) else None
+    for cand in _MAC_APP_CANDIDATES:
+        if os.path.isdir(cand) and _is_mt5_bundle(cand):
+            return cand
+    found = []
+    for root in _MAC_APP_SEARCH_DIRS:
+        try:
+            for name in os.listdir(root):
+                if not name.endswith(".app"):
+                    continue
+                low = name.lower()
+                if "metatrader" in low or low.startswith("mt5"):
+                    full = os.path.join(root, name)
+                    if _is_mt5_bundle(full):
+                        found.append(full)
+        except OSError:
+            continue
+    if not found:
+        return None
+    # prefer the plain, unbranded bundle, then the shortest name
+    found.sort(key=lambda p: (os.path.basename(p) != "MetaTrader 5.app",
+                              len(os.path.basename(p))))
+    return found[0]
+
+
+def _is_mt5_bundle(path: str) -> bool:
+    """True when this .app is an MT5 install with the Wine runtime inside."""
+    return os.path.exists(os.path.join(path, "Contents/SharedSupport/wine"))
+
+
+def _patch_mt5_mac_app(app_path: str) -> None:
+    """Point the ``mt5_mac`` module at ``app_path``.
+
+    Done by rewriting the module-level constants it reads at call time
+    (``bootstrap.ensure_environment``'s defaults are bound at import, so its
+    globals are patched too). Raises nothing: if a future version of the
+    package stops exposing these names we simply do nothing and let its own
+    error surface.
+    """
+    try:
+        import mt5_mac  # type: ignore
+        from mt5_mac import backend as _b, bootstrap as _boot  # type: ignore
+    except Exception:  # noqa: BLE001 - not installed / unexpected layout
+        return
+    wine = os.path.join(app_path, "Contents", "SharedSupport", "wine", "bin", "wine64")
+    for mod in (mt5_mac, _b, _boot):
+        if hasattr(mod, "MT5_APP"):
+            setattr(mod, "MT5_APP", app_path)
+        if hasattr(mod, "WINE_BIN"):
+            setattr(mod, "WINE_BIN", wine)
+    log.info("Using MetaTrader 5 bundle at %s", app_path)
+
+
+def _preflight_mac_backend(backend: str) -> None:
+    """Fail early, with an actionable message, when macOS MT5 is not usable."""
+    if sys.platform != "darwin":
+        return
+    app = find_mac_mt5_app()
+    if app is None:
+        raise MT5Error(
+            "MetaTrader 5.app was not found.\n"
+            "Looked for: " + "\n            ".join(
+                list(_MAC_APP_CANDIDATES[:1]) + ["/Applications/*MetaTrader*.app",
+                                                 "~/Applications/*MetaTrader*.app"]) + "\n"
+            "  • Installed somewhere else? Point at it:\n"
+            "      export MT5_APP=/Applications/'MetaTrader 5 (Exness).app'\n"
+            "      python -m moneyminter connect --symbols EURUSD\n"
+            "  • Not installed? Get it from https://www.metatrader5.com/en/download\n"
+            "    (drag it into /Applications, not just anywhere in your home folder)."
+        )
+    _patch_mt5_mac_app(app)
+
+
+
+def _explain_init_failure(exc: Exception) -> str:
+    text = str(exc)
+    low = text.lower()
+    if "metatrader 5.app not found" in low or "bootstrap" in low:
+        return (
+            "MetaTrader 5.app was not found where the macOS bridge expects it.\n"
+            "It insists on /Applications/MetaTrader 5.app, and broker-branded\n"
+            "installs are named differently.\n\n"
+            "Fix it one of two ways:\n"
+            "  1. Tell Money Minter where yours is (recommended):\n"
+            "       ls /Applications | grep -i metatrader\n"
+            "       export MT5_APP=\"/Applications/<exact name>.app\"\n"
+            "  2. Or make a link with the name it wants:\n"
+            "       ln -s \"/Applications/<exact name>.app\" \"/Applications/MetaTrader 5.app\"\n\n"
+            f"Original error: {text}"
+        )
+    if "wine" in low:
+        return ("The Wine runtime inside MetaTrader 5.app could not start.\n"
+                "Launch MetaTrader 5 manually once, confirm it opens, then retry.\n"
+                f"Original error: {text}")
+    return f"Could not start the MT5 bridge: {text}"
 
 
 def _import_mt5(host: Optional[str] = None, port: int = 18812, backend: str = "auto"):
@@ -71,6 +193,7 @@ def _import_mt5(host: Optional[str] = None, port: int = 18812, backend: str = "a
     if backend in ("auto", "mac"):
         try:
             import mt5_mac  # type: ignore
+            _preflight_mac_backend(backend)
             log.info("Using the mt5_mac backend (MetaTrader 5.app bundled Wine)")
             return mt5_mac
         except ImportError:
@@ -152,9 +275,20 @@ class MT5Broker(Broker):
         if login:
             kwargs.update(login=int(login), password=password, server=server)
         self._init_kwargs = dict(kwargs)
-        if not self.mt5.initialize(**kwargs):
-            raise MT5Error(f"MT5 initialize() failed: {self.mt5.last_error()}. "
-                           "Is the terminal running and logged in?")
+        try:
+            ok = self.mt5.initialize(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - bridge errors vary by backend
+            raise MT5Error(_explain_init_failure(exc)) from exc
+        if not ok:
+            raise MT5Error(
+                f"MT5 initialize() failed: {self.mt5.last_error()}.\n"
+                "The terminal must be OPEN and LOGGED IN before this runs.\n"
+                "Check, in order:\n"
+                "  1. MetaTrader 5 is running and shows your account in the title bar\n"
+                "  2. Tools > Options > Experts: 'Allow algorithmic trading' ticked\n"
+                "     and 'Disable algorithmic trading via external Python API' NOT ticked\n"
+                "  3. The Algo Trading toolbar button is green\n"
+                "  4. On macOS: export MT5_APP=<path to your MetaTrader 5.app>")
 
         info = self.mt5.account_info()
         if info is None:
