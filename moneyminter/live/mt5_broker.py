@@ -94,32 +94,93 @@ def find_mac_mt5_app() -> Optional[str]:
     return found[0]
 
 
+#: the Wine binary has moved between MT5 builds; try all of them
+_WINE_BIN_RELATIVE = (
+    "Contents/SharedSupport/wine/bin/wine64",        # MT5 build 4000+
+    "Contents/SharedSupport/wine/bin/wine",
+    "Contents/SharedSupport/metatrader5/MetaTrader 5/wine64",   # older bundles
+    "Contents/Frameworks/wine/bin/wine64",
+    "Contents/Resources/wine/bin/wine64",
+)
+
+
+def find_wine_binary(app_path: str) -> Optional[str]:
+    """Return the Wine executable inside an MT5 bundle, or None.
+
+    This is the *real* check. ``mt5_mac`` tests only for
+    ``Contents/SharedSupport/wine/bin/wine64``, so on a bundle whose Wine
+    runtime lives elsewhere it raises "MetaTrader 5.app not found" while the
+    app sits in /Applications exactly where the installer put it.
+    """
+    for rel in _WINE_BIN_RELATIVE:
+        path = os.path.join(app_path, rel)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    # last resort: a bounded search inside the bundle
+    for root, dirs, files in os.walk(app_path):
+        depth = root[len(app_path):].count(os.sep)
+        if depth > 5:
+            dirs[:] = []
+            continue
+        for name in ("wine64", "wine"):
+            if name in files:
+                full = os.path.join(root, name)
+                if os.access(full, os.X_OK):
+                    return full
+    return None
+
+
 def _is_mt5_bundle(path: str) -> bool:
-    """True when this .app is an MT5 install with the Wine runtime inside."""
-    return os.path.exists(os.path.join(path, "Contents/SharedSupport/wine"))
+    """True when this .app is an MT5 install with a usable Wine runtime."""
+    return find_wine_binary(path) is not None
+
+
+def diagnose_mac_app(app_path: str) -> str:
+    """Explain what is present inside an .app when no Wine binary is found."""
+    lines = [f"Inspecting {app_path}"]
+    if not os.path.isdir(app_path):
+        return f"{app_path} is not a directory"
+    for rel in ("Contents", "Contents/SharedSupport", "Contents/MacOS",
+                "Contents/SharedSupport/wine"):
+        lines.append(f"  {'ok ' if os.path.exists(os.path.join(app_path, rel)) else 'MISSING'} "
+                     f"{rel}")
+    try:
+        top = sorted(os.listdir(os.path.join(app_path, "Contents")))
+        lines.append("  Contents/: " + ", ".join(top[:12]))
+    except OSError:
+        pass
+    return "\n".join(lines)
 
 
 def _patch_mt5_mac_app(app_path: str) -> None:
     """Point the ``mt5_mac`` module at ``app_path``.
 
-    Done by rewriting the module-level constants it reads at call time
-    (``bootstrap.ensure_environment``'s defaults are bound at import, so its
-    globals are patched too). Raises nothing: if a future version of the
-    package stops exposing these names we simply do nothing and let its own
-    error surface.
+    Rewrites the module-level constants it reads at call time, in ``mt5_mac``,
+    ``mt5_mac.backend`` and ``mt5_mac.bootstrap`` (``ensure_environment`` takes
+    ``wine_bin`` as a default argument, so the bootstrap copy matters too).
+    Silent if a future version stops exposing these names — its own error is
+    better than a crash from here.
     """
     try:
-        import mt5_mac  # type: ignore
-        from mt5_mac import backend as _b, bootstrap as _boot  # type: ignore
-    except Exception:  # noqa: BLE001 - not installed / unexpected layout
+        import importlib
+        pkg = importlib.import_module("mt5_mac")
+    except Exception:  # noqa: BLE001 - not installed
         return
-    wine = os.path.join(app_path, "Contents", "SharedSupport", "wine", "bin", "wine64")
-    for mod in (mt5_mac, _b, _boot):
+    wine = find_wine_binary(app_path)
+    if wine is None:
+        return
+    mods = [pkg]
+    for sub in ("backend", "bootstrap"):
+        try:
+            mods.append(importlib.import_module(f"mt5_mac.{sub}"))
+        except Exception:  # noqa: BLE001
+            continue
+    for mod in mods:
         if hasattr(mod, "MT5_APP"):
             setattr(mod, "MT5_APP", app_path)
         if hasattr(mod, "WINE_BIN"):
             setattr(mod, "WINE_BIN", wine)
-    log.info("Using MetaTrader 5 bundle at %s", app_path)
+    log.info("Using MetaTrader 5 bundle at %s (wine: %s)", app_path, wine)
 
 
 def _preflight_mac_backend(backend: str) -> None:
@@ -129,18 +190,28 @@ def _preflight_mac_backend(backend: str) -> None:
     app = find_mac_mt5_app()
     if app is None:
         raise MT5Error(
-            "MetaTrader 5.app was not found.\n"
-            "Looked for: " + "\n            ".join(
-                list(_MAC_APP_CANDIDATES[:1]) + ["/Applications/*MetaTrader*.app",
-                                                 "~/Applications/*MetaTrader*.app"]) + "\n"
+            "MetaTrader 5.app was not found, or has no usable Wine runtime.\n"
+            "Looked for: /Applications/*MetaTrader*.app and "
+            "~/Applications/*MetaTrader*.app\n"
             "  • Installed somewhere else? Point at it:\n"
-            "      export MT5_APP=/Applications/'MetaTrader 5 (Exness).app'\n"
-            "      python -m moneyminter connect --symbols EURUSD\n"
+            "      export MT5_APP=\"/Applications/MetaTrader 5.app\"\n"
             "  • Not installed? Get it from https://www.metatrader5.com/en/download\n"
-            "    (drag it into /Applications, not just anywhere in your home folder)."
+            "    and drag it into /Applications."
+        )
+    if find_wine_binary(app) is None:
+        raise MT5Error(
+            "MetaTrader 5.app is installed but its Wine runtime is missing, so\n"
+            "Python cannot drive it.\n\n"
+            + diagnose_mac_app(app) + "\n\n"
+            "This usually means the bundle is damaged or was moved after install.\n"
+            "Either:\n"
+            "  • Reinstall MT5 from https://www.metatrader5.com/en/download\n"
+            "    (it overwrites the bundle and restores Wine), or\n"
+            "  • Use a remote bridge instead — run MT5 on a Windows VPS and\n"
+            "      python -m moneyminter connect --mt5-host <vps-ip> --mt5-port 18812\n"
+            "    which avoids the macOS Wine layer entirely. See LIVE_TRADING.md §0c."
         )
     _patch_mt5_mac_app(app)
-
 
 
 def _explain_init_failure(exc: Exception) -> str:

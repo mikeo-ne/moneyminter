@@ -440,7 +440,13 @@ def test_symbol_scan_prefers_fx_over_lookalike_crypto(mt5):
 def _fake_app(root, name, with_wine=True):
     import os
     app = os.path.join(root, name)
-    os.makedirs(os.path.join(app, "Contents", "SharedSupport", "wine", "bin"), exist_ok=True)
+    bindir = os.path.join(app, "Contents", "SharedSupport", "wine", "bin")
+    os.makedirs(bindir, exist_ok=True)
+    if with_wine:
+        exe = os.path.join(bindir, "wine64")
+        with open(exe, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(exe, 0o755)
     return app
 
 
@@ -501,3 +507,77 @@ def test_bootstrap_error_is_translated_into_a_fix(monkeypatch):
     msg = mb._explain_init_failure(Exception(
         "MetaTrader 5.app not found at /Applications/MetaTrader 5.app."))
     assert "MT5_APP" in msg and "ls /Applications" in msg
+
+
+def _fake_app_alt_wine(root, name):
+    """An MT5 bundle whose Wine lives where mt5_mac does not look."""
+    import os
+    app = os.path.join(root, name)
+    wine = os.path.join(app, "Contents", "SharedSupport", "metatrader5",
+                        "MetaTrader 5", "wine64")
+    os.makedirs(os.path.dirname(wine), exist_ok=True)
+    with open(wine, "w") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(wine, 0o755)
+    return app
+
+
+def test_app_found_when_wine_lives_elsewhere_in_the_bundle(tmp_path, monkeypatch):
+    """The reported failure: MT5 IS installed, but at a non-standard Wine path.
+
+    mt5_mac only checks SharedSupport/wine/bin/wine64, so this bundle made it
+    report 'MetaTrader 5.app not found' while MT5 was open on screen.
+    """
+    import moneyminter.live.mt5_broker as mb
+    app = _fake_app_alt_wine(str(tmp_path), "MetaTrader 5.app")
+    monkeypatch.delenv("MT5_APP", raising=False)
+    monkeypatch.setattr(mb, "_MAC_APP_CANDIDATES", ())
+    monkeypatch.setattr(mb, "_MAC_APP_SEARCH_DIRS", (str(tmp_path),))
+    assert mb.find_mac_mt5_app() == app
+    assert mb.find_wine_binary(app).endswith("wine64")
+
+
+def test_missing_wine_runtime_is_reported_with_bundle_contents(tmp_path, monkeypatch):
+    """An app with no Wine at all must explain itself, not just 'not found'."""
+    import os
+    import pytest
+    import moneyminter.live.mt5_broker as mb
+    app = os.path.join(str(tmp_path), "MetaTrader 5.app")
+    os.makedirs(os.path.join(app, "Contents"), exist_ok=True)
+    with open(os.path.join(app, "Contents", "Info.plist"), "w") as fh:
+        fh.write("<plist/>")
+    assert mb.find_wine_binary(app) is None
+    assert "MISSING Contents/SharedSupport" in mb.diagnose_mac_app(app)
+
+    monkeypatch.setattr(mb.sys, "platform", "darwin")
+    monkeypatch.setattr(mb, "find_mac_mt5_app", lambda: app)
+    with pytest.raises(mb.MT5Error) as err:
+        mb._preflight_mac_backend("mac")
+    msg = str(err.value)
+    assert "Wine runtime is missing" in msg
+    assert "metatrader5.com" in msg
+
+
+def test_wine_patch_points_mt5_mac_at_the_real_binary(tmp_path, monkeypatch):
+    """Patching must fix WINE_BIN as well as MT5_APP, or the bridge still fails."""
+    import sys
+    import types
+    import moneyminter.live.mt5_broker as mb
+    app = _fake_app_alt_wine(str(tmp_path), "MetaTrader 5.app")
+
+    fake = types.ModuleType("mt5_mac")
+    fake.MT5_APP = "/Applications/MetaTrader 5.app"
+    fake.WINE_BIN = "/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
+    fake_backend = types.ModuleType("mt5_mac.backend")
+    fake_backend.WINE_BIN = fake.WINE_BIN
+    fake.bootstrap = types.ModuleType("mt5_mac.bootstrap")
+    fake.bootstrap.WINE_BIN = fake.WINE_BIN
+    monkeypatch.setitem(sys.modules, "mt5_mac", fake)
+    monkeypatch.setitem(sys.modules, "mt5_mac.backend", fake_backend)
+    monkeypatch.setitem(sys.modules, "mt5_mac.bootstrap", fake.bootstrap)
+
+    mb._patch_mt5_mac_app(app)
+    assert fake.MT5_APP == app
+    assert fake.WINE_BIN == mb.find_wine_binary(app)
+    assert fake_backend.WINE_BIN == fake.WINE_BIN
+    assert fake.bootstrap.WINE_BIN == fake.WINE_BIN

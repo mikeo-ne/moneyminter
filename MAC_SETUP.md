@@ -237,10 +237,39 @@ location, the drivers, the backend, and an offline trading session. Run it
 whenever something looks wrong; it tells you which specific thing to fix.
 
 > **If you see `mt5_mac.bootstrap.BootstrapError: MetaTrader 5.app not found at
-> /Applications/MetaTrader 5.app`** — this is the single most common macOS
-> failure, and it does **not** mean MT5 is missing. `mt5_mac` hard-codes that
-> exact path, and the Exness installer writes `MetaTrader 5 (Exness).app`
-> instead, so the check fails even though MT5 is open on your screen.
+> /Applications/MetaTrader 5.app`** — this is the most common macOS failure, and
+> it does **not** usually mean MT5 is missing. `mt5_mac` does not check that the
+> folder exists; it checks for one specific file inside it:
+>
+> ```
+> /Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64
+> ```
+>
+> MT5's build-to-build layout shuffles that Wine runtime around, so a correct
+> install can fail this check. Confirm for yourself:
+>
+> ```bash
+> ls "/Applications/MetaTrader 5.app/Contents/SharedSupport/"
+> find "/Applications/MetaTrader 5.app" -name "wine64" -maxdepth 6
+> ```
+>
+> If the second command prints a path, the runtime is there and **`connect`
+> now finds it by itself** — Money Minter locates the Wine binary wherever the
+> bundle keeps it and points the bridge at it. If both commands come back empty,
+> the bundle really is damaged: reinstall from metatrader5.com.
+
+> **Did you clone before the macOS fixes?** The four lines below are the whole
+> difference between the old behaviour and the working one — if your copy is
+> older, update it first:
+>
+> ```bash
+> cd ~/moneyminter && git pull
+> ```
+
+> Also: `mt5_mac` hard-codes the bundle *name* `/Applications/MetaTrader 5.app`,
+> while broker-branded installers write `MetaTrader 5 (Exness).app`. Money
+> Minter searches both `/Applications` and `~/Applications` for any
+> `*MetaTrader*.app`, so a branded install normally just works.
 
 Find the real name:
 
@@ -426,7 +455,9 @@ regardless of how good the equity curve looks.
 | Symptom | Fix |
 |---|---|
 | `No MetaTrader 5 backend available` | Run `pip install mt5_mac` inside the activated venv, then retry |
-| `BootstrapError: MetaTrader 5.app not found` | Not actually missing — see Step 5. Run `ls /Applications \| grep -i meta` then `export MT5_APP="..."` |
+| `BootstrapError: MetaTrader 5.app not found` | Usually **not** actually missing — see Step 5. `git pull` for the fix that locates the Wine binary wherever the bundle keeps it |
+| `error: argument cmd: invalid choice: 'doctor'` | Your copy predates the command. `cd ~/moneyminter && git pull` |
+| `doctor` works but your edit doesn't seem to apply | You are running an installed copy in `site-packages`; check the `Code in use` line in `doctor` |
 | `No module named mt5_mac` | `pip install mt5_mac` in the activated venv |
 | Lost / can't tell what's wrong | `python -m moneyminter doctor` |
 | `initialize() failed` | MT5 not running, or not logged in. Launch it manually first |

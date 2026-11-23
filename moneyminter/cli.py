@@ -319,7 +319,7 @@ def cmd_connect(args) -> int:
 def cmd_doctor(args) -> int:
     """Check every prerequisite for connecting to MetaTrader 5, one by one."""
     import importlib
-    import shutil
+    import os
     import sys as _sys
 
     print(BANNER)
@@ -333,10 +333,20 @@ def cmd_doctor(args) -> int:
         print(f"  {mark} {label}" + (f"  {detail}" if detail else ""))
 
     print("Environment")
-    line(True, "Platform", f"{_sys.platform} ({_sys.platform == 'darwin' and 'macOS' or 'not macOS'})")
+    line(True, "Platform",
+         f"{_sys.platform} " +
+         ("(macOS)" if _sys.platform == "darwin" else "(MT5 needs Windows, or macOS+mt5_mac)"))
     line(_sys.version_info >= (3, 10), "Python",
          f"{_sys.version.split()[0]} (3.10+ required)")
     line(True, "Interpreter", _sys.executable)
+
+    import moneyminter as _pkg
+    src = os.path.dirname(os.path.abspath(_pkg.__file__))
+    line(True, "Code in use", f"{src} (v{getattr(_pkg, '__version__', '?')})")
+    if "site-packages" in src:
+        print("      note: running an installed copy — 'git pull' will NOT update it.")
+        print("            From the repo directory use  PYTHONPATH=. python -m moneyminter ...")
+        print("            or reinstall with  pip install -e .")
     if not _sys.prefix.endswith(".venv") and "venv" not in _sys.prefix:
         print("    note: not inside a virtualenv — consider 'source .venv/bin/activate'")
 
