@@ -39,7 +39,7 @@ from ..management import hard_breach, manage_bar
 from ..models import Position, Side, SignalType, Trade, utcnow
 from ..risk import RiskConfig, RiskManager
 from ..strategies import Strategy, get_strategy
-from .mt5_broker import MT5Broker, MT5Error
+from .mt5_broker import MT5Broker, MT5Error, OrderRejected, StaleSignal
 
 log = logging.getLogger("moneyminter.live")
 
@@ -413,15 +413,30 @@ class LiveTrader:
                 self._emit("blocked", f"{signal.type.value} {symbol} blocked: {why}")
                 return
             price = self.broker.price(symbol)
+            # The signal was computed on a bar that has since closed. If the
+            # market has already run through the stop, the setup is gone: size
+            # from a stop that is now inside the spread would be meaningless and
+            # the broker would reject the order anyway.
+            if signal.stop_loss:
+                past = ((signal.side is Side.BUY and price <= signal.stop_loss)
+                        or (signal.side is Side.SELL and price >= signal.stop_loss))
+                if past:
+                    self._emit("skip", f"{symbol}: price moved past the stop "
+                                       f"({price:.5f} vs {signal.stop_loss:.5f}) — setup gone")
+                    return
             units = self.risk.position_size(equity, price, signal.stop_loss,
                                             get_instrument(symbol), signal.confidence)
             if units <= 0:
                 return
-            p = self.broker.open(symbol, signal.side, units, price, now,
-                                 signal.stop_loss, signal.take_profit, strat.name,
-                                 trail_atr=signal.trail_atr,
-                                 breakeven_at_r=signal.breakeven_at_r,
-                                 max_bars=signal.max_bars)
+            try:
+                p = self.broker.open(symbol, signal.side, units, price, now,
+                                     signal.stop_loss, signal.take_profit, strat.name,
+                                     trail_atr=signal.trail_atr,
+                                     breakeven_at_r=signal.breakeven_at_r,
+                                     max_bars=signal.max_bars)
+            except (OrderRejected, StaleSignal) as exc:
+                self._emit("skip", str(exc))
+                return
             if p:
                 self._known_tickets.add(p.id)
                 self._ticket_symbols[p.id] = symbol

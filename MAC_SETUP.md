@@ -175,8 +175,23 @@ pip install -r requirements.txt
 
 **Check:** your prompt is prefixed with `(.venv)`.
 
-> Every time you open a **new** Terminal window you must re-activate:
-> `cd ~/moneyminter && source .venv/bin/activate`
+> **You must re-activate in every new Terminal window.** If you forget, you'll
+> see `zsh: command not found: python` — that is not a missing Python, it's an
+> inactive venv.
+>
+> If `python` is still not found *after* activating (some venvs ship `python3`
+> only), use either of these permanently:
+>
+> ```bash
+> ln -sf python3 ~/moneyminter/.venv/bin/python     # add the shim, once
+> .venv/bin/python -m moneyminter doctor            # or just call it directly
+> ```
+>
+> To rebuild the environment from scratch at any time:
+>
+> ```bash
+> cd ~/moneyminter && bash scripts/bootstrap-venv.sh
+> ```
 
 ---
 
@@ -255,8 +270,22 @@ whenever something looks wrong; it tells you which specific thing to fix.
 >
 > If the second command prints a path, the runtime is there and **`connect`
 > now finds it by itself** — Money Minter locates the Wine binary wherever the
-> bundle keeps it and points the bridge at it. If both commands come back empty,
-> the bundle really is damaged: reinstall from metatrader5.com.
+> bundle keeps it and points the bridge at it.
+>
+> If it prints nothing but `SharedSupport/` contains `wine`, then that `wine`
+> directory is a **launcher script, not a Wine runtime**, and no Python driver
+> can use it. That is a packaging problem in the MT5 build, not something
+> Python can work around. Your options, in order of reliability:
+>
+> | Option | Effort | Notes |
+> |---|---|---|
+> | **Windows VPS** (~$10/mo) | low | MT5 runs natively, no Wine at all. The recommended way to run 24/5. |
+> | **`siliconmetatrader5`** | medium | Docker runtime that speaks the MT5 API over a local socket; `pip install siliconmetatrader5`, then `connect --mt5-host 127.0.0.1 --mt5-port 8001` |
+> | Reinstall MT5 | low | Sometimes restores the Wine runtime; `brew install --cask metatrader5` may already be installed as your `MetaTrader 5.app` |
+> | Buy MT5's VPS from the app | paid | The "Specialized VPS for MetaTrader" banner inside MT5 |
+>
+> **Important:** all of these keep the same commands and the same code — only
+> the connection changes. `--mt5-host` is all that differs.
 
 > **Did you clone before the macOS fixes?** The four lines below are the whole
 > difference between the old behaviour and the working one — if your copy is
@@ -458,6 +487,10 @@ regardless of how good the equity curve looks.
 | `BootstrapError: MetaTrader 5.app not found` | Usually **not** actually missing — see Step 5. `git pull` for the fix that locates the Wine binary wherever the bundle keeps it |
 | `error: argument cmd: invalid choice: 'doctor'` | Your copy predates the command. `cd ~/moneyminter && git pull` |
 | `doctor` works but your edit doesn't seem to apply | You are running an installed copy in `site-packages`; check the `Code in use` line in `doctor` |
+| `zsh: command not found: python` | Venv not activated. `source .venv/bin/activate`, or run `.venv/bin/python -m moneyminter ...` |
+| `✗ wine64` missing / only `SharedSupport/wine` exists | No usable Wine runtime in the bundle — see the table in Step 5 |
+| `setup gone` in the log | Normal. Price ran past the stop before the order went out, so the trade was skipped |
+| `Order rejected: retcode=10019` | Not enough free margin for that lot size — lower `--risk` |
 | `No module named mt5_mac` | `pip install mt5_mac` in the activated venv |
 | Lost / can't tell what's wrong | `python -m moneyminter doctor` |
 | `initialize() failed` | MT5 not running, or not logged in. Launch it manually first |

@@ -17,6 +17,7 @@ That makes it impossible to point this at a funded live account by accident.
 """
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import sys
@@ -44,6 +45,18 @@ _SUFFIXES = ["", "m", "z", "c", ".", "_", "micro", ".a", "-ECN", "ecn", "pro", "
 
 class MT5Error(RuntimeError):
     pass
+
+
+class StaleSignal(MT5Error):
+    """The setup is no longer valid at the current price — skip this one."""
+
+
+class OrderRejected(MT5Error):
+    """The broker refused one order. The account and connection are fine.
+
+    Kept distinct from :class:`MT5Error` because a rejected order must never
+    escalate to a reconnect, and must never abort the poll for every symbol.
+    """
 
 
 # ---------------------------------------------------------------- macOS app
@@ -136,21 +149,45 @@ def _is_mt5_bundle(path: str) -> bool:
 
 
 def diagnose_mac_app(app_path: str) -> str:
-    """Explain what is present inside an .app when no Wine binary is found."""
+    """Explain what is actually inside an .app when no Wine binary is found.
+
+    Recursive, because the interesting answer is always *somewhere* deeper than
+    the two directories a first version checked.
+    """
     lines = [f"Inspecting {app_path}"]
     if not os.path.isdir(app_path):
         return f"{app_path} is not a directory"
     for rel in ("Contents", "Contents/SharedSupport", "Contents/MacOS",
                 "Contents/SharedSupport/wine"):
-        lines.append(f"  {'ok ' if os.path.exists(os.path.join(app_path, rel)) else 'MISSING'} "
+        lines.append(f"  {'ok     ' if os.path.exists(os.path.join(app_path, rel)) else 'MISSING'} "
                      f"{rel}")
+    found = []
+    for proj in ("lib/wine/*/wine64", "lib/wine/*/wine",
+                 "**/wine64", "**/wine", "**/wineserver"):
+        pattern = os.path.join(app_path, "Contents", proj)
+        found.extend(f for f in glob.glob(pattern, recursive=True)
+                     if os.path.isfile(f))
+        if found:
+            break
+    if found:
+        lines.append("  executables found:")
+        for f in sorted(set(found))[:6]:
+            lines.append(f"    {'+' if os.access(f, os.X_OK) else '-'} "
+                         f"{os.path.relpath(f, app_path)}")
+        winners = [f for f in found if os.path.basename(f) == "wine64"
+                   and os.access(f, os.X_OK)]
+        if not winners:
+            lines.append("    (none named 'wine64' and executable — the bridge")
+            lines.append("     cannot use these; a launcher script is not enough)")
+    else:
+        lines.append("  no wine executable anywhere inside the bundle")
     try:
-        top = sorted(os.listdir(os.path.join(app_path, "Contents")))
-        lines.append("  Contents/: " + ", ".join(top[:12]))
+        tree = os.path.join(app_path, "Contents", "SharedSupport")
+        if os.path.isdir(tree):
+            lines.append("  SharedSupport/: " + ", ".join(sorted(os.listdir(tree))[:12]))
     except OSError:
         pass
     return "\n".join(lines)
-
 
 def _patch_mt5_mac_app(app_path: str) -> None:
     """Point the ``mt5_mac`` module at ``app_path``.
@@ -600,7 +637,12 @@ class MT5Broker(Broker):
                                   "symbol": request.get("symbol"),
                                   "volume": request.get("volume"),
                                   "type": request.get("type")})
-            raise MT5Error(f"Order rejected: retcode={result.retcode} {result.comment}")
+            # A rejection is a normal market event (price moved, no margin,
+            # invalid stops), not a connection failure. Surface it on a
+            # dedicated exception so the caller can skip this one idea and
+            # carry on with the other symbols.
+            raise OrderRejected(
+                f"Order rejected: retcode={result.retcode} {result.comment}")
         raise MT5Error("Order failed after retries")
 
     def open(self, symbol, side: Side, units, price=None, ts=None,
@@ -629,6 +671,14 @@ class MT5Broker(Broker):
         }
         if stop_loss:
             req["sl"] = round(float(stop_loss), s.digits)
+            # Refuse a stop that is already inside the spread: the broker
+            # answers 10016 'invalid stop loss' and, worse, the position would
+            # have no protection at all. This happens when the market gaps
+            # between the signal bar closing and the order being sent.
+            if (is_buy and req["sl"] >= entry) or (not is_buy and req["sl"] <= entry):
+                raise StaleSignal(
+                    f"{symbol}: price moved past the stop before the order was sent "
+                    f"(entry {entry:.5f}, stop {req['sl']:.5f})")
         if take_profit:
             req["tp"] = round(float(take_profit), s.digits)
 

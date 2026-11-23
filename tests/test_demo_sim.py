@@ -70,12 +70,29 @@ def test_broker_side_stop_loss_actually_executes(terminal):
 
 
 def test_invalid_stops_are_rejected_like_a_real_broker(terminal):
-    from moneyminter.live import MT5Error
-    terminal()
+    """A stop on the wrong side must never reach the market.
+
+    Two layers now: the client refuses it before sending (so the position is
+    never left unprotected), and the terminal itself still rejects it.
+    """
+    from moneyminter.live import MT5Error, StaleSignal
+    term = terminal()
     b = _broker()
     price = b.price("EUR/USD")
-    with pytest.raises(MT5Error, match="invalid stop loss"):
+
+    with pytest.raises(StaleSignal, match="moved past the stop"):
         b.open("EUR/USD", Side.BUY, 100_000, stop_loss=price + 0.0010)
+    assert not term.sent_orders, "nothing may be sent when the stop is invalid"
+
+    # bypass our guard to prove the simulated broker rejects it too
+    req = {"symbol": "EURUSDm", "type": term.ORDER_TYPE_BUY, "volume": 1.0,
+           "price": price, "sl": price + 0.0010, "tp": 0.0,
+           "action": term.TRADE_ACTION_DEAL, "magic": 1, "comment": "",
+           "type_time": term.ORDER_TIME_GTC, "type_filling": term.ORDER_FILLING_IOC,
+           "deviation": 20}
+    res = term.order_send(req)
+    assert res.retcode != term.TRADE_RETCODE_DONE
+    assert "invalid stop" in res.comment.lower()
 
 
 def test_no_money_is_reported_not_swallowed(terminal):
@@ -210,3 +227,44 @@ def test_risk_guardrail_blocks_a_second_correlated_entry(monkeypatch):
 
 if __name__ == "__main__":       # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+def test_price_running_through_the_stop_is_a_skip_not_a_crash(monkeypatch):
+    """Regression: a fast bar made the robot abort and look disconnected.
+
+    The signal is computed on the last CLOSED bar. A violent bar can then run
+    21 pips through the stop before the order is sent, which the broker rejects
+    with 10016. That used to raise MT5Error, and because it was the only symbol
+    the poll escalated it to a reconnect — killing a healthy session.
+    """
+    term, t = _trader(monkeypatch, symbols=["EUR/USD"], timeframe="M5",
+                      strategy="trend_pullback", history_bars=800,
+                      risk=RiskConfig(risk_per_trade=0.02))
+    skips = []
+    for _ in range(3000):
+        t.poll()                            # must not raise
+        skips = [e for e in t.events if e["kind"] == "skip"]
+        if skips:
+            break
+    # either the market never gapped on this seed (fine) or we skipped cleanly
+    for ev in skips:
+        assert "setup gone" in ev["message"] or "rejected" in ev["message"]
+    # the session must still be alive and armed
+    assert t.risk.halted_reason is None
+
+
+def test_rejected_order_does_not_escalate_to_reconnect(monkeypatch):
+    term, t = _trader(monkeypatch, symbols=["EUR/USD"], timeframe="M5",
+                      strategy="trend_pullback", history_bars=800,
+                      risk=RiskConfig(risk_per_trade=0.02))
+    from moneyminter.live import OrderRejected
+    orig = t.broker.open
+
+    def boom(*a, **kw):
+        raise OrderRejected("Order rejected: retcode=10019 no money")
+
+    t.broker.open = boom
+    for _ in range(400):
+        t.poll()                            # a single-symbol rejection used to abort
+    assert any(e["kind"] == "skip" for e in t.events)
+    t.broker.open = orig

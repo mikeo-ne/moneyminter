@@ -581,3 +581,42 @@ def test_wine_patch_points_mt5_mac_at_the_real_binary(tmp_path, monkeypatch):
     assert fake.WINE_BIN == mb.find_wine_binary(app)
     assert fake_backend.WINE_BIN == fake.WINE_BIN
     assert fake.bootstrap.WINE_BIN == fake.WINE_BIN
+
+
+def test_diagnose_reports_launcher_script_without_wine64(tmp_path):
+    """The user's bundle: a 'wine' launcher exists, but no executable wine64.
+
+    mt5_mac needs wine64 specifically. Reporting the full contents is the only
+    way to tell a damaged bundle from a moved one.
+    """
+    import os
+    import moneyminter.live.mt5_broker as mb
+    app = os.path.join(str(tmp_path), "MetaTrader 5.app")
+    bindir = os.path.join(app, "Contents", "SharedSupport", "wine", "bin")
+    os.makedirs(bindir)
+    launcher = os.path.join(bindir, "wine")
+    with open(launcher, "w") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(launcher, 0o755)
+
+    # 'wine' is a usable driver when wine64 is absent, so discovery accepts it;
+    # the point of the report is to show WHAT was found, so a damaged bundle is
+    # distinguishable from a merely relocated one.
+    assert mb.find_wine_binary(app) == launcher
+    report = mb.diagnose_mac_app(app)
+    assert "bin/wine" in report
+    assert "SharedSupport/: wine" in report
+
+
+def test_find_wine_binary_scans_beyond_known_layouts(tmp_path):
+    """A future MT5 build that moves Wine again should still be found."""
+    import os
+    import moneyminter.live.mt5_broker as mb
+    app = os.path.join(str(tmp_path), "MetaTrader 5.app")
+    deep = os.path.join(app, "Contents", "Vendor", "runtime", "bin")
+    os.makedirs(deep)
+    exe = os.path.join(deep, "wine64")
+    with open(exe, "w") as fh:
+        fh.write("#!/bin/sh\n")
+    os.chmod(exe, 0o755)
+    assert mb.find_wine_binary(app) == exe
