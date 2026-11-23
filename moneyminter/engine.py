@@ -17,6 +17,7 @@ from .broker import ExecutionConfig, PaperBroker
 from .data import load_feed
 from .data.feeds import LiveTickStream, timeframe_seconds
 from .instruments import get_instrument, normalize
+from .management import hard_breach, manage_bar
 from .models import Position, SignalType, Trade, utcnow
 from .risk import RiskConfig, RiskManager
 from .strategies import Strategy, get_strategy
@@ -120,7 +121,9 @@ class TradingBot:
             with self._lock:
                 for p in list(self.broker.positions.values()):
                     t = self.broker.close(p, self.prices[p.symbol], self.now(), "bot stopped")
-                    self._emit("close", f"Closed {t.symbol} {t.side.value} @ {t.exit_price:.5f}", t.to_dict())
+                    self.risk.record_result(p.symbol, t.pnl, self.now())
+                    self._emit("close", f"Closed {t.symbol} {t.side.value} @ "
+                                        f"{t.exit_price:.5f} (P&L ${t.pnl:,.2f})", t.to_dict())
         self._emit("info", "Money Minter stopped", {"equity": self.equity()})
 
     def reset(self) -> None:
@@ -154,14 +157,17 @@ class TradingBot:
             self.risk.update_equity(equity, now.date())
 
     def _check_stops(self, symbol: str, price: float, now: datetime) -> None:
+        """Tick-level backstop for the stop; the bar manager handles the rest."""
         pos = self.broker.position_for(symbol)
         if pos is None:
             return
-        hit = pos.hit_stop(price, price)
+        inst = get_instrument(symbol)
+        half = inst.pip * inst.typical_spread_pips / 2
+        hit = hard_breach(pos, price - half, price + half)
         if hit is not None:
-            reason = "stop loss" if pos.stop_loss is not None and abs(hit - pos.stop_loss) < 1e-12 else "take profit"
-            trade = self.broker.close(pos, hit, now, reason)
-            self._emit("close", f"{reason.title()} {symbol} {trade.side.value} "
+            trade = self.broker.close(pos, hit.price, now, hit.reason)
+            self.risk.record_result(symbol, trade.pnl, now)
+            self._emit("close", f"{hit.reason.title()} {symbol} {trade.side.value} "
                                 f"P&L ${trade.pnl:,.2f}", trade.to_dict())
 
     def _on_bar(self, symbol: str, df: pd.DataFrame, now: datetime) -> None:
@@ -169,18 +175,40 @@ class TradingBot:
         prepared = strat.prepare(df)
         if len(prepared) < strat.warmup + 2:
             return
+        prepared.attrs["symbol"] = symbol
         prepared.symbol_name = symbol
         pos = self.broker.position_for(symbol)
-        signal = strat.on_bar(prepared, pos)
         price = self.prices[symbol]
+        last = prepared.iloc[-1]
+        atr_val = float(last["atr"]) if "atr" in prepared.columns and \
+            pd.notna(last.get("atr")) else None
+
+        # 1. advance the open position through the closed bar with the same
+        #    manager the backtester and live runner use
+        if pos is not None:
+            decision = manage_bar(pos, float(last.high), float(last.low), price, atr_val)
+            if decision is not None:
+                trade = self.broker.close(pos, decision.price, now, decision.reason)
+                self.risk.record_result(symbol, trade.pnl, now)
+                self._emit("close", f"{decision.reason.title()} {symbol} "
+                                    f"{trade.side.value} P&L ${trade.pnl:,.2f}",
+                           trade.to_dict())
+                return
+            pos = self.broker.position_for(symbol)
+
+        signal = strat.on_bar(prepared, pos)
 
         if pos is not None and signal.type is SignalType.CLOSE:
             trade = self.broker.close(pos, price, now, signal.reason or "signal")
+            self.risk.record_result(symbol, trade.pnl, now)
             self._emit("close", f"Closed {symbol} {trade.side.value} P&L ${trade.pnl:,.2f}", trade.to_dict())
             return
         if pos is None and signal.is_entry:
             equity = self.broker.equity(self.prices)
-            ok, why = self.risk.can_open(equity, len(self.broker.positions), now.date())
+            ok, why = self.risk.can_open(
+                equity, len(self.broker.positions), now.date(), symbol=symbol,
+                open_symbols=[p.symbol for p in self.broker.positions.values()],
+                portfolio_risk=self.broker.open_risk(equity), now=now)
             if not ok:
                 self._emit("blocked", f"Signal {signal.type.value} {symbol} blocked: {why}", {})
                 return
@@ -189,7 +217,10 @@ class TradingBot:
             if units <= 0:
                 return
             p = self.broker.open(symbol, signal.side, units, price, now,
-                                 signal.stop_loss, signal.take_profit, strat.name)
+                                 signal.stop_loss, signal.take_profit, strat.name,
+                                 trail_atr=signal.trail_atr,
+                                 breakeven_at_r=signal.breakeven_at_r,
+                                 max_bars=signal.max_bars)
             if p:
                 self._emit("open", f"Opened {symbol} {p.side.value} {units:,.0f} units @ {p.entry_price:.5f}"
                                    f" — {signal.reason}", p.to_dict())

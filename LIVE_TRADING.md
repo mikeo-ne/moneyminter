@@ -3,6 +3,14 @@
 This guide takes you from a working MT5 terminal to the robot placing orders on
 your **Exness demo account**.
 
+> **Do this first, before you install anything:** run the built-in simulator.
+> `python -m moneyminter demo` exercises the exact same order-placing code —
+> `MT5Broker`, broker-side stops, trailing-stop updates, reconciliation — against
+> a fake terminal, in about 20 seconds and on any OS. It will not tell you
+> whether a strategy is profitable (the prices are synthetic) but it *will* catch
+> symbol-suffix, lot-size and stop-side bugs before you involve a broker.
+> See [§0d](#0d-no-terminal-test-the-live-path-in-20-seconds).
+
 > **Read this first.** Money Minter refuses to touch a real-money account unless you
 > pass an explicit override flag (see [Moving to a live account](#moving-to-a-live-account)). That default is deliberate — keep it until the robot
 > has proven itself on demo for weeks. Nothing here is financial advice, and the
@@ -89,6 +97,64 @@ python -m moneyminter connect --symbols EUR/USD --mt5-host <vps-ip>
 > (`ssh -L 18812:localhost:18812 user@vps`) and still connect to `127.0.0.1`. Never open
 > port 18812 to the internet.
 
+### 0d. No terminal? Test the live path in 20 seconds
+
+```bash
+python -m moneyminter demo --symbols EUR/USD GBP/USD --timeframe M5 --polls 6000
+```
+
+```
+Simulated DEMO account #78234001 — MoneyMinter-Sim
+  Balance 10,000.00 USD | leverage 1:500
+  OK EUR/USD   -> EURUSDm    1.07527    spread   6pts min lot 0.01 | size 0.24 lots
+  OK GBP/USD   -> GBPUSDm    1.27535    spread   9pts min lot 0.01 | size 0.24 lots
+
+  Start equity     : 10,000.00
+  Final equity     : 9,960.31  (-0.40%)
+  Trades closed    : 1 (0W / 1L, win 0.0%)
+  Average R        : -1.02R
+  Activity         : close=1, info=1, open=1
+    · Position 100001 closed by broker: stop loss (P&L -39.69)
+    · Opened GBP/USD BUY 0.17 lots @ 1.28254 SL 1.28024 TP 1.29054 — uptrend pullback
+```
+
+What this proves, all of which is broker-independent plumbing:
+
+* orders are constructed correctly and fill at the ask/bid plus slippage,
+* broker symbol suffixes (`EURUSDm`) resolve,
+* lot sizes land on the broker's grid, and undersized trades are **skipped**,
+* stop-losses fire **from the broker side** even if your process dies,
+* trailing-stop updates (`TRADE_ACTION_SLTP`) are accepted,
+* requotes are retried, invalid stops and insufficient margin are surfaced,
+* a disconnect does not corrupt risk state or latch the kill switch,
+* broker-initiated closes are reconciled into the P&L with the real fill price.
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--polls 6000 --bars-per-poll 1` | 6,000 M5 bars ≈ 20 trading days |
+| `--chaos` | Reject the first order, to exercise the retry path |
+| `--close-on-exit` | Flatten at the end of the run |
+| `--json run.json` | Save the full state and event log |
+| `--symbol-suffix ""` | Emulate a broker with no suffix (Pro/Zero/Raw) |
+
+The dashboard has the same thing on the **Demo account** tab, with a live
+equity curve and every broker position/trade.
+
+**Before you put a strategy on a real demo account, validate it:**
+
+```bash
+python -m moneyminter validate --strategy trend_pullback --samples 12 --json reports/validation.json
+```
+
+Read the verdict, not the score. `REJECTED` on synthetic data is expected and
+correct — the simulator has no edge to find. Re-run with `--source yahoo` or a
+CSV exported from your broker for a real answer. A strategy earns the demo
+account; it does not get handed it.
+
+---
+
 ## 1. Prepare MT5
 
 1. Install **MetaTrader 5** (per §0 for your OS) and log into your **Exness demo** account
@@ -159,20 +225,56 @@ Let this run for a few hours and confirm the signals look sane.
 
 ```powershell
 python -m moneyminter live --symbols EUR/USD GBP/USD --timeframe M5 `
-    --strategy ma_crossover --risk 0.005 --max-positions 2
+    --strategy trend_pullback --risk 0.0025 --max-positions 2
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--risk 0.005` | Risk 0.5% of equity per trade |
+| `--risk 0.0025` | Risk 0.25% of equity per trade |
 | `--max-positions 2` | Never hold more than 2 at once |
 | `--max-daily-loss 0.03` | Stop trading for the day at −3% |
 | `--max-drawdown 0.15` | Kill switch at −15% from the peak |
 | `--poll 5` | Seconds between checks |
 | `--close-on-exit` | Flatten the robot's positions on Ctrl-C |
 | `--dry-run` | Log orders instead of sending them |
+| `--no-trail` | Do **not** push trailing stops to the broker |
+| `--journal run.jsonl` | Append every event to a file |
 
 The robot acts on **closed bars only**, so on `M5` expect a decision every 5 minutes.
+
+### What the robot does to your stops
+
+Every entry carries a stop-loss and take-profit **at the broker**, so a crash or
+disconnect cannot leave you naked. While the trade lives, the robot additionally:
+
+1. **Trails the stop** to `trail_atr` ATRs behind the best price seen, and
+2. **Moves it to break-even** once the trade is 1R in profit,
+
+re-sending the new stop to the broker with `TRADE_ACTION_SLTP`. The exact same
+code runs in the backtester, so the demo and the backtest cannot disagree about
+where the stop was.
+
+**Trailing-stop updates are rejected by some brokers during news or when the
+terminal loses the symbol.** When that happens the robot logs a `warn` event and
+keeps the previous (wider) broker-side stop rather than removing protection.
+
+### Watching the P&L
+
+Stop-outs are executed by the broker, not by Python. After each cycle the runner
+**reconciles**: any position it used to own and no longer does is matched to the
+broker's closing deal, and the trade is recorded with the broker's own fill price,
+P&L and reason (`stop loss` / `take profit`). Without that step a losing robot
+looks flat, because most exits are stop-outs.
+
+Check the real number with:
+
+```
+equity 9,960.31 (-39.69) | open 0 | trades 7 | avg -0.42R
+```
+
+`avg R` is the honest summary: the average result per trade in units of what you
+risked. Anything above 0 across a few hundred trades is worth investigating;
+anything meaningfully below 0 is a strategy that should not be funded.
 
 ## 7. Safety model
 
@@ -191,7 +293,16 @@ Built-in protections, all enforced in code and covered by tests:
   small for the stop distance: use an **Exness Cent account**, a wider stop, or a
   larger timeframe.
 - **Broker-side SL/TP.** Every order carries stop-loss and take-profit *at the broker*,
-  so your risk is capped even if your PC dies.
+  so your risk is capped even if your PC dies. Trailing stops are also pushed to the
+  broker (`TRADE_ACTION_SLTP`); nothing that protects you lives only in Python.
+- **One position per symbol.** A second signal on a pair you already hold is ignored.
+- **Correlated exposure is refused.** Long EUR/USD and long GBP/USD is one USD bet —
+  the risk manager allows only one per currency bloc.
+- **Portfolio risk ceiling.** The sum of open risk cannot exceed 3% of equity.
+- **Loss-streak pause.** Four consecutive losses on a symbol sits that symbol out for
+  four hours, which stops a mis-fitted strategy from bleeding continuously.
+- **No reconciliation gaps.** Trades the broker closed (SL/TP, or you by hand) are
+  recorded with the broker's fill price and reason, so the demo P&L is complete.
 - **Algo Trading check** before a single order is sent.
 
 # Windows VPS quick start (recommended)
@@ -208,7 +319,7 @@ offers a free VPS to funded accounts). Connect over RDP, then install:
 
 ### 2. Install the bot
 ```powershell
-git clone -b arena/01a0b105-moneyminter https://github.com/mikeo-ne/moneyminter
+git clone https://github.com/mikeo-ne/moneyminter
 cd moneyminter
 python -m venv .venv
 .venv\Scripts\activate
@@ -218,9 +329,10 @@ pip install MetaTrader5
 
 ### 3. Verify, then run
 ```powershell
-python -m moneyminter connect --symbols EURUSD GBPUSD   # no orders
-python -m moneyminter live --symbols EURUSD --dry-run   # no orders
-python -m moneyminter live --symbols EURUSD GBPUSD --timeframe M5 --risk 0.005
+python -m moneyminter demo --symbols EURUSD GBPUSD --polls 3000   # no terminal needed
+python -m moneyminter connect --symbols EURUSD GBPUSD            # no orders
+python -m moneyminter live --symbols EURUSD --dry-run            # no orders
+python -m moneyminter live --symbols EURUSD GBPUSD --timeframe M5 --risk 0.0025
 ```
 
 ### 4. Keep it running
@@ -278,8 +390,21 @@ risk-based sizing actually fits a small balance instead of being skipped for bei
 below the minimum lot.
 
 ### Expect this to lose money at first
-The strategies here are textbook (EMA cross, Donchian breakout, RSI). They are a working
-*framework*, not a proven edge. The README's backtest figures come from a **simulator**.
+The strategies are built on documented market behaviour (trend persistence, volatility
+compression, session structure) and they all decline to trade when that behaviour is
+absent. That is a sound *design*, not a proven *edge* — and the simulator cannot prove
+anything at all, by construction.
+
+Concretely: on the offline feed everything loses roughly the transaction cost, because
+the feed has no exploitable structure. That tells you the cost model and the machinery
+work. It does not tell you the strategy works. Only your broker's real prices, across
+many samples and out-of-sample folds, can do that:
+
+```powershell
+python -m moneyminter validate --source csv --csv data/eurusd_h1.csv `
+    --strategy trend_pullback --samples 12
+```
+
 Treat your first live months as paying tuition to validate the plumbing, not as income.
 
 ---
@@ -301,5 +426,10 @@ Treat your first live months as paying tuition to validate the plumbing, not as 
 | Nothing happens for ages | Normal — it waits for closed bars *and* a signal. Use `-v` |
 | `Lost connection to the MT5 terminal` | MT5 closed or the VPS signed you out (use Disconnect) |
 | Bot stopped after a network blip | Shouldn't happen — it auto-reconnects. Report it with `-v` logs |
+| `close failed ... position not found` | The broker's SL/TP already closed it — harmless, reconciliation records it |
+| `stop update rejected` | Broker refused a trail step (news/symbol unavailable); the previous stop stays in force |
+| `position already closed` | Race between your close order and the broker's stop — safe, no double close |
+| Strategy never trades on demo | Check `--dry-run` logs; most strategies wait for a regime, and warmup needs history |
+| `avg R` deeply negative | The strategy has no edge on these prices. Do not fund it |
 
 Run `python -m moneyminter live -v` for verbose logs.

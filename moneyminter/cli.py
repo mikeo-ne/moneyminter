@@ -25,14 +25,18 @@ BANNER = r"""
 
 
 def _risk_from(args) -> RiskConfig:
-    return RiskConfig(risk_per_trade=args.risk, max_positions=args.max_positions,
-                      max_daily_loss=args.max_daily_loss, max_drawdown=args.max_drawdown)
+    return RiskConfig(
+        risk_per_trade=args.risk,
+        max_positions=args.max_positions,
+        max_daily_loss=getattr(args, "max_daily_loss", 0.03),
+        max_drawdown=args.max_drawdown)
 
 
+# --------------------------------------------------------------------- backtest
 def cmd_backtest(args) -> int:
     res = run_backtest(args.symbol, args.timeframe, args.strategy, args.balance,
-                       source=args.source, bars=args.bars, path=args.csv, seed=args.seed,
-                       risk=_risk_from(args),
+                       source=args.source, bars=args.bars, path=getattr(args, "csv", None),
+                       seed=args.seed, risk=_risk_from(args),
                        execution=ExecutionConfig(spread_multiplier=args.spread_mult),
                        strategy_params=json.loads(args.params) if args.params else None)
     res.print_report()
@@ -43,33 +47,80 @@ def cmd_backtest(args) -> int:
     if args.show_trades:
         print("\nLast 20 trades:")
         for t in res.trades[-20:]:
+            r = f"{t.r_multiple:+.2f}R" if t.r_multiple is not None else "     "
             print(f"  {t.closed_at:%Y-%m-%d %H:%M} {t.symbol} {t.side.value:<4} "
                   f"{t.units:>10,.0f}u  {t.entry_price:.5f} -> {t.exit_price:.5f}  "
-                  f"${t.pnl:>9,.2f}  {t.reason}")
+                  f"${t.pnl:>9,.2f}  {r:>7}  {t.reason}")
     return 0
 
 
 def cmd_optimize(args) -> int:
-    grid = json.loads(args.grid)
-    rows = optimize(args.symbol, args.timeframe, args.strategy, grid, args.metric,
-                    balance=args.balance, source=args.source, bars=args.bars, seed=args.seed)
+    rows = optimize(args.symbol, args.timeframe, args.strategy, json.loads(args.grid),
+                    args.metric, balance=args.balance, source=args.source,
+                    bars=args.bars, seed=args.seed, risk=_risk_from(args))
     print(f"\nTop {args.top} parameter sets by {args.metric}:")
     for r in rows[:args.top]:
-        print(f"  {json.dumps(r['params']):<50} {args.metric}={r[args.metric]:>8.3f} "
-              f"net=${r['net_profit']:>10,.2f} pf={r['profit_factor']:.2f} trades={r['trades']}")
+        print(f"  {json.dumps(r['params']):<48} {args.metric}={r[args.metric]:>8.3f} "
+              f"net=${r['net_profit']:>10,.2f} pf={r['profit_factor']:.2f} "
+              f"trades={r['trades']} dd={r['max_drawdown_pct']:.1f}%")
+    print("\nReminder: optimised parameters are fitted. Confirm them out-of-sample "
+          "with `moneyminter walkforward`.")
     return 0
 
 
 def cmd_walkforward(args) -> int:
+    grid = json.loads(args.grid) if args.grid else None
     rows = walk_forward(args.symbol, args.timeframe, args.strategy, args.folds,
-                        balance=args.balance, source=args.source, bars=args.bars, seed=args.seed)
-    print("\nWalk-forward folds:")
+                        optimize_params=grid, balance=args.balance,
+                        source=args.source, bars=args.bars, seed=args.seed,
+                        risk=_risk_from(args))
+    print(f"\nWalk-forward ({'anchored optimise + OOS test' if grid else 'out-of-sample splits'}):")
+    profitable = 0
     for r in rows:
-        print(f"  fold {r['fold']}: net=${r['net_profit']:>10,.2f} ret={r['return_pct']:>7.2f}% "
-              f"pf={r['profit_factor']:.2f} sharpe={r['sharpe']:.2f} trades={r['trades']}")
+        if r["return_pct"] > 0:
+            profitable += 1
+        params = json.dumps(r.get("params", {})) if grid else ""
+        print(f"  fold {r['fold']}: net=${r['net_profit']:>10,.2f} "
+              f"ret={r['return_pct']:>7.2f}% pf={r['profit_factor']:.2f} "
+              f"sharpe={r['sharpe']:.2f} trades={r['trades']:>3} {params}")
+    if rows:
+        print(f"\n  {profitable}/{len(rows)} folds profitable out-of-sample")
     return 0
 
 
+# --------------------------------------------------------------------- validate
+def cmd_validate(args) -> int:
+    from .validation import scan, save_reports, validate
+
+    if args.strategy == "all":
+        reports = scan(symbol=args.symbol, timeframe=args.timeframe,
+                       samples=args.samples, bars=args.bars)
+    else:
+        reports = [validate(args.strategy, symbol=args.symbol, timeframe=args.timeframe,
+                            samples=args.samples, bars=args.bars,
+                            params=json.loads(args.params) if args.params else None)]
+    print(f"\n{'Strategy':<20} {'Score':>6} {'Verdict':<11} {'Prof':>5}  "
+          f"{'PF':>5} {'Median ret':>11} {'Trades':>7} {'Worst':>8}")
+    print("-" * 84)
+    for r in reports:
+        print(f"{r.strategy:<20} {r.score:>6.1f} {r.verdict:<11} "
+              f"{r.profitable_pct * 100:>4.0f}%  {r.median_pf:>5.2f} "
+              f"{r.median_return_pct:>10.2f}% {r.total_trades:>7} "
+              f"{r.worst_return_pct:>7.1f}%")
+    if len(reports) == 1:
+        print("\n" + reports[0].summary())
+    if args.json:
+        path = save_reports(reports, args.json)
+        print(f"\nSaved validation report -> {path}")
+    print("\nNote: samples come from the offline simulator, which is calibrated to "
+          "have\nno exploitable edge. 'rejected' here means a strategy cannot beat "
+          "costs on\nrandom data — which is the correct answer. Validate on real "
+          "prices with\n`--source yahoo` or your broker's CSV before drawing any "
+          "conclusion.")
+    return 0
+
+
+# --------------------------------------------------------------------- paper
 def cmd_trade(args) -> int:
     cfg = BotConfig.load(args.config) if args.config else BotConfig(
         symbols=args.symbols, timeframe=args.timeframe, strategy=args.strategy,
@@ -77,9 +128,10 @@ def cmd_trade(args) -> int:
         strategy_params=json.loads(args.params) if args.params else {})
     bot = TradingBot(cfg)
     print(BANNER)
-    print(f"Paper trading {', '.join(cfg.symbols)} on {cfg.timeframe} with '{cfg.strategy}' "
-          f"(speed x{cfg.speed}). Ctrl-C to stop.\n")
+    print(f"Paper trading {', '.join(cfg.symbols)} on {cfg.timeframe} with "
+          f"'{cfg.strategy}' (speed x{cfg.speed}). Ctrl-C to stop.\n")
     bot.start()
+    started = time.time()
     try:
         while True:
             time.sleep(args.refresh)
@@ -91,8 +143,7 @@ def cmd_trade(args) -> int:
             for ev in list(bot.events)[:1]:
                 if ev["kind"] in ("open", "close"):
                     print(f"          {ev['message']}")
-            if args.duration and bot.started_at and \
-                    (time.time() - bot.started_at.timestamp()) > args.duration:
+            if args.duration and (time.time() - started) > args.duration:
                 break
     except KeyboardInterrupt:
         print("\nStopping...")
@@ -117,6 +168,92 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------- demo sim
+def cmd_demo(args) -> int:
+    """Full demo-account trial against the simulated MT5 terminal.
+
+    This runs the *live* code path — MT5Broker, broker-side stops, trailing,
+    reconciliation — with no terminal and no waiting.
+    """
+    from .live import LiveConfig, LiveTrader
+    from .live.sim_terminal import install
+
+    install(terminal=None, symbols=args.symbols, timeframe=args.timeframe,
+            bars=max(1000, args.bars), seed=args.seed, balance=args.balance,
+            suffix=args.symbol_suffix if args.symbol_suffix is not None else "m",
+            reject_first=1 if args.chaos else 0)
+    cfg = LiveConfig(
+        symbols=args.symbols, timeframe=args.timeframe, strategy=args.strategy,
+        strategy_params=json.loads(args.params) if args.params else {},
+        risk=_risk_from(args), sim=True, sim_bars_per_poll=args.bars_per_poll,
+        history_bars=max(300, args.bars), poll_seconds=0, journal_path=args.journal)
+    trader = LiveTrader(cfg)
+    print(BANNER)
+    pf = trader.preflight()
+    a = pf["account"]
+    print(f"Simulated {'DEMO' if a['demo'] else 'LIVE'} account #{a['login']} — "
+          f"{a['server']}")
+    print(f"  Balance {a['balance']:,.2f} {a['currency']} | leverage 1:{a['leverage']}")
+    for r in pf["symbols"]:
+        flag = "OK " if r["ready"] else "!! "
+        print(f"  {flag}{r['symbol']:<9} -> {r['broker_symbol']:<10} "
+              f"{r['price']:<10.5f} spread {r['spread_points']:>3}pts "
+              f"min lot {r['min_lot']} | size {r['example_lots']} lots")
+    print(f"\nStrategy {args.strategy} on {args.timeframe}, "
+          f"{args.polls} polls x {args.bars_per_poll} bars "
+          f"({args.polls * args.bars_per_poll} bars of market).")
+    print("Running the real live code path against the simulator…\n")
+
+    t0 = time.time()
+    try:
+        for i in range(args.polls):
+            trader.poll()
+            if args.verbose and (i + 1) % max(1, args.polls // 10) == 0:
+                s = trader.state()
+                print(f"  [{i + 1:>5}/{args.polls}] equity {s['equity']:>10,.2f} "
+                      f"open {len(s['positions'])} trades {s['stats']['trades']}")
+    except KeyboardInterrupt:
+        print("\nStopped early.")
+    elapsed = time.time() - t0
+    if args.close_on_exit:
+        trader.stop(close_positions=True)
+    else:
+        trader.stop(close_positions=False)
+
+    s = trader.state()
+    st = s["stats"]
+    print("\n" + "=" * 66)
+    print(f"  Simulated demo result ({elapsed:.1f}s of wall time)")
+    print("=" * 66)
+    print(f"  Start equity     : {trader.start_equity:,.2f}")
+    print(f"  Final equity     : {s['equity']:,.2f}  ({s['pnl_pct']:+.2f}%)")
+    print(f"  Realised P&L     : {st['total_pnl']:+,.2f}")
+    print(f"  Trades closed    : {st['trades']} ({st['wins']}W / {st['losses']}L, "
+          f"win {st['win_rate']}%)")
+    print(f"  Average R        : {st['avg_r']:+.2f}R")
+    print(f"  Open at exit     : {len(s['positions'])}")
+    if trader.broker.rejected:
+        print(f"  Orders rejected  : {trader.broker.rejected}")
+    print(f"  Max drawdown     : {st['risk']['drawdown_pct']:.2f}%   "
+          f"daily {st['risk']['daily_pnl_pct']:+.2f}%")
+    counts = {}
+    for e in trader.events:
+        counts[e["kind"]] = counts.get(e["kind"], 0) + 1
+    print(f"  Activity         : " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    print("\n  Recent activity:")
+    for e in s["events"][:12]:
+        print(f"    · {e['message'][:88]}")
+    print("\n  This exercised real order placement, broker-side stops, trailing, and\n"
+          "  reconciliation — the same code that will run on your Exness demo. It\n"
+          "  says nothing about profitability (the price feed is synthetic).")
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump({"state": s, "events": trader.events[:200]}, fh, indent=2, default=str)
+        print(f"\n  Saved -> {args.json}")
+    return 0
+
+
+# --------------------------------------------------------------------- live
 def _live_config(args):
     """Build a LiveConfig, taking credentials from env vars (never the CLI)."""
     import os
@@ -139,6 +276,8 @@ def _live_config(args):
         port=args.mt5_port,
         backend=args.mt5_backend,
         poll_seconds=getattr(args, "poll", 5.0),
+        trail_broker_stops=not getattr(args, "no_trail", False),
+        journal_path=getattr(args, "journal", None),
     )
 
 
@@ -161,14 +300,18 @@ def cmd_connect(args) -> int:
     print(f"  Leverage      : 1:{a['leverage']}")
     print("\nSymbols:")
     for r in info["symbols"]:
-        flag = "✓" if r["ready"] else "✗"
+        flag = "✓" if r["ready"] else "!"
         print(f"  {flag} {r['symbol']:<9} -> {r['broker_symbol']:<12} "
               f"price {r['price']:<12.5f} spread {r['spread_points']:>4} pts  "
               f"min lot {r['min_lot']:<5} step {r['lot_step']:<5} "
               f"| example trade {r['example_lots']} lots | {r['bars_available']} bars")
-    print("\nIf the symbols and lot sizes look right, start with:")
+    print("\nIf the symbols and lot sizes look right, do a dry run first:")
     print(f"  python -m moneyminter live --symbols {' '.join(args.symbols)} "
           f"--timeframe {args.timeframe} --strategy {args.strategy} --dry-run")
+    print("Then, on the demo account:")
+    print(f"  python -m moneyminter live --symbols {' '.join(args.symbols)} "
+          f"--timeframe {args.timeframe} --strategy {args.strategy} "
+          f"--risk {args.risk}")
     trader.broker.shutdown()
     return 0
 
@@ -214,11 +357,12 @@ def cmd_live(args) -> int:
             s = trader.state()
             print(f"[{time.strftime('%H:%M:%S')}] equity {s['equity']:,.2f} "
                   f"({s['pnl']:+,.2f}) | open {len(s['positions'])} | "
-                  f"trades {len(trader.broker.trades)}")
+                  f"trades {s['stats']['trades']} | avg {s['stats']['avg_r']:+.2f}R")
             for ev in s["events"][:1]:
                 if ev["kind"] in ("open", "close", "error", "blocked"):
                     print(f"          {ev['message']}")
-            if args.duration and (time.time() - trader.start_ts if hasattr(trader, "start_ts") else 0) > args.duration:
+            if args.duration and trader.start_ts and \
+                    (time.time() - trader.start_ts.timestamp()) > args.duration:
                 break
     except KeyboardInterrupt:
         print("\nStopping...")
@@ -231,33 +375,39 @@ def cmd_strategies(_args) -> int:
     print("\nAvailable strategies:")
     for name, cls in available_strategies().items():
         doc = (cls.__doc__ or "").strip().split("\n")[0]
-        print(f"  {name:<18} {doc}")
+        style = getattr(cls, "style", "")
+        print(f"  {name:<18} {style:<22} {doc}")
     print("\nAvailable instruments:")
     print("  " + ", ".join(INSTRUMENTS))
     return 0
 
 
+# --------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser("moneyminter", description="Money Minter — automated FX trading robot")
+    p = argparse.ArgumentParser("moneyminter",
+                                description="Money Minter — automated FX trading robot")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp, symbols=False):
         if symbols:
-            sp.add_argument("--symbols", nargs="+", default=["EUR/USD", "GBP/USD", "USD/JPY"])
+            sp.add_argument("--symbols", nargs="+",
+                            default=["EUR/USD", "GBP/USD", "USD/JPY"])
         else:
             sp.add_argument("--symbol", default="EUR/USD")
         sp.add_argument("--timeframe", default="H1")
-        sp.add_argument("--strategy", default="ma_crossover")
+        sp.add_argument("--strategy", default="trend_pullback")
         sp.add_argument("--balance", type=float, default=10_000.0)
-        sp.add_argument("--source", default="synthetic", choices=["synthetic", "yahoo", "csv"])
+        sp.add_argument("--source", default="synthetic",
+                        choices=["synthetic", "yahoo", "csv"])
         sp.add_argument("--bars", type=int, default=3000)
         sp.add_argument("--seed", type=int, default=7)
-        sp.add_argument("--risk", type=float, default=0.01, help="fraction of equity risked per trade")
+        sp.add_argument("--risk", type=float, default=0.005,
+                        help="fraction of equity risked per trade (default 0.5%%)")
         sp.add_argument("--max-positions", type=int, default=3)
-        sp.add_argument("--max-daily-loss", type=float, default=0.05)
-        sp.add_argument("--max-drawdown", type=float, default=0.25)
-        sp.add_argument("--params", help='JSON strategy params, e.g. \'{"fast":8,"slow":21}\'')
+        sp.add_argument("--max-daily-loss", type=float, default=0.03)
+        sp.add_argument("--max-drawdown", type=float, default=0.15)
+        sp.add_argument("--params", help='JSON strategy params, e.g. \'{"fast":20}\'')
 
     bt = sub.add_parser("backtest", help="run a historical backtest")
     common(bt)
@@ -269,23 +419,48 @@ def build_parser() -> argparse.ArgumentParser:
 
     op = sub.add_parser("optimize", help="grid-search strategy parameters")
     common(op)
-    op.add_argument("--grid", required=True, help='JSON grid, e.g. \'{"fast":[8,12],"slow":[26,34]}\'')
+    op.add_argument("--grid", required=True,
+                    help='JSON grid, e.g. \'{"fast":[8,12],"slow":[26,34]}\'')
     op.add_argument("--metric", default="sharpe")
     op.add_argument("--top", type=int, default=10)
     op.set_defaults(func=cmd_optimize)
 
-    wf = sub.add_parser("walkforward", help="sequential out-of-sample validation")
+    wf = sub.add_parser("walkforward", help="out-of-sample validation folds")
     common(wf)
     wf.add_argument("--folds", type=int, default=4)
+    wf.add_argument("--grid", help="optional grid to optimise in each training window")
     wf.set_defaults(func=cmd_walkforward)
+
+    va = sub.add_parser("validate", help="full robustness battery for a strategy")
+    common(va)
+    va.add_argument("--samples", type=int, default=12,
+                    help="independent price samples to test on")
+    va.add_argument("--json", help="save the full report as JSON")
+    va.set_defaults(func=cmd_validate)
 
     tr = sub.add_parser("trade", help="run the robot (paper trading)")
     common(tr, symbols=True)
-    tr.add_argument("--speed", type=float, default=60.0, help="simulation speed multiplier")
+    tr.add_argument("--speed", type=float, default=60.0,
+                    help="simulation speed multiplier")
     tr.add_argument("--refresh", type=float, default=2.0)
     tr.add_argument("--duration", type=float, default=0, help="seconds to run (0 = forever)")
     tr.add_argument("--config", help="JSON bot config file")
     tr.set_defaults(func=cmd_trade)
+
+    dm = sub.add_parser("demo", help="full demo trial on a simulated MT5 terminal")
+    common(dm, symbols=True)
+    dm.add_argument("--polls", type=int, default=3000,
+                    help="number of poll cycles (default 3000)")
+    dm.add_argument("--bars-per-poll", type=int, default=1,
+                    help="simulated bars advanced per poll")
+    dm.add_argument("--symbol-suffix", default="m",
+                    help="broker symbol suffix to emulate (default 'm' = Exness)")
+    dm.add_argument("--chaos", action="store_true",
+                    help="reject the first order to exercise retry logic")
+    dm.add_argument("--close-on-exit", action="store_true")
+    dm.add_argument("--journal")
+    dm.add_argument("--json")
+    dm.set_defaults(func=cmd_demo)
 
     db = sub.add_parser("dashboard", help="launch the web dashboard")
     common(db, symbols=True)
@@ -297,16 +472,17 @@ def build_parser() -> argparse.ArgumentParser:
     db.set_defaults(func=cmd_dashboard)
 
     def live_flags(sp):
-        sp.add_argument("--symbol-suffix", help="broker symbol suffix, e.g. 'm' for Exness (auto-detected)")
+        sp.add_argument("--symbol-suffix",
+                        help="broker symbol suffix, e.g. 'm' for Exness (auto-detected)")
         sp.add_argument("--terminal-path", help="path to terminal64.exe")
         sp.add_argument("--poll", type=float, default=5.0, help="seconds between checks")
-        sp.add_argument("--mt5-host", help="host of a remote MT5 bridge (Linux/Wine, macOS "
-                                           "Docker, or a Windows box on your LAN)")
-        sp.add_argument("--mt5-port", type=int, default=18812,
-                        help="bridge port (mt5linux 18812, siliconmetatrader5 8001)")
+        sp.add_argument("--mt5-host", help="host of a remote MT5 bridge")
+        sp.add_argument("--mt5-port", type=int, default=18812)
         sp.add_argument("--mt5-backend", default="auto",
-                        choices=["auto", "local", "mac", "rpyc"],
-                        help="which MT5 backend to use (default: auto-detect)")
+                        choices=["auto", "local", "mac", "rpyc"])
+        sp.add_argument("--no-trail", action="store_true",
+                        help="do not push trailing stops to the broker")
+        sp.add_argument("--journal", help="append events to this JSONL file")
 
     cn = sub.add_parser("connect", help="test the MT5/Exness connection (sends no orders)")
     common(cn, symbols=True)
@@ -322,7 +498,8 @@ def build_parser() -> argparse.ArgumentParser:
     lv.add_argument("--duration", type=float, default=0)
     lv.add_argument("--close-on-exit", action="store_true",
                     help="flatten all robot positions when stopping")
-    lv.add_argument("--yes", action="store_true", help="skip the live-account confirmation prompt")
+    lv.add_argument("--yes", action="store_true",
+                    help="skip the live-account confirmation prompt")
     lv.add_argument("--once", action="store_true",
                     help="run a single poll and exit (for cron / health checks)")
     lv.add_argument("--i-understand-live-risk", action="store_true",
@@ -340,7 +517,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
-    if args.timeframe if hasattr(args, "timeframe") else None:
+    if hasattr(args, "timeframe") and args.timeframe:
         args.timeframe = args.timeframe.upper()
     return args.func(args)
 

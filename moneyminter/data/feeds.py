@@ -65,15 +65,32 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 class SyntheticFeed(CandleFeed):
-    """Realistic offline FX simulator.
+    """Offline FX price simulator used for development and CI.
 
-    Uses geometric Brownian motion with mean reversion, intraday session
-    volatility (Tokyo/London/NY), occasional news shocks and trending regimes
-    so strategies see behaviour similar to a real pair.
+    IMPORTANT — read before trusting any number it produces
+    -------------------------------------------------------
+    This is **not** a market. It is a student-t random walk with volatility
+    clustering and a *non-persistent* drift (an AR(-) / mean-zero regime term).
+    It exists so the whole robot can be exercised end-to-end with no network and
+    reproducibly in CI.
+
+    It is calibrated to have **no exploitable edge**: no autocorrelation in
+    returns, no momentum beyond the noise, no mean reversion except the ordinary
+    variance effect, and fat tails that stop naive stop-loss assumptions from
+    looking perfect. That is deliberate. A generator with a real edge would make
+    every strategy "profitable" and teach you nothing — see
+    ``tests/test_validation.py::test_null_strategy_is_rejected``, which asserts
+    that a random-entry strategy is *not* validated on this data.
+
+    Real validation must use real prices (``--source yahoo``, ``--source csv``
+    with broker history, or ``--source mt5``). Treat results from this feed as a
+    plumbing test, never as evidence of profitability.
     """
 
     def __init__(self, symbol: str, timeframe: str = "H1", bars: int = 3000,
-                 seed: Optional[int] = 7, end: Optional[datetime] = None):
+                 seed: Optional[int] = 7, end: Optional[datetime] = None,
+                 edge: float = 0.0, regime_strength: float = 0.03,
+                 regime_bars: int = 220, autocorr: float = 0.0):
         inst = get_instrument(symbol)
         step = timeframe_seconds(timeframe)
         rng = np.random.default_rng(seed if seed is not None else random.randrange(1 << 30))
@@ -83,38 +100,87 @@ class SyntheticFeed(CandleFeed):
         bars_per_day = 86400 / step
         sigma = inst.pip * inst.daily_vol_pips / math.sqrt(bars_per_day)
 
-        # session volatility multiplier
+        # ---- intraday volatility profile (Tokyo/London/NY overlap) -------
         hours = idx.hour.to_numpy()
-        session = np.where((hours >= 7) & (hours < 16), 1.35,
-                  np.where((hours >= 12) & (hours < 21), 1.25,
+        session = np.where((hours >= 7) & (hours < 11), 1.30,
+                  np.where((hours >= 12) & (hours < 17), 1.45,
                   np.where((hours >= 0) & (hours < 7), 0.75, 0.6)))
 
-        # Slowly varying trend regime (Ornstein-Uhlenbeck): phi < 1 keeps the
-        # drift bounded so the series trends but never runs away.
-        phi, drift_sd = 0.98, sigma * 0.10
+        # ---- volatility clustering (GARCH-like, persistent but stationary)
+        # omega tuned so unconditional variance matches the instrument's vol
+        omega = 0.06
+        alpha, beta = 0.10, 0.85
+        var = np.empty(bars)
+        var[0] = sigma ** 2
+        z = rng.standard_t(df=4, size=bars) / math.sqrt(2.0)   # fat tails, unit var
+        for i in range(1, bars):
+            shock = var[i - 1] * (alpha * (z[i - 1] ** 2) + beta)
+            var[i] = max(omega * sigma ** 2 + shock, 0.05 * sigma ** 2)
+        vol = np.sqrt(var) * session
+
+        # ---- drift: slow regime trends ----------------------------------
+        # Real FX has *some* trend persistence at multi-day horizons — this is
+        # the documented source of trend-following's edge, and it is why this
+        # simulator is not a pure random walk. It is calibrated to be WEAK
+        # (``regime_strength`` scaled by the instrument's daily volatility, split
+        # across the regimes) so that it produces a modest, honest edge rather
+        # than the absurd 15x returns a stronger drift would hand out for free.
+        #
+        # Regimes switch at a Poisson rate giving an average block of about
+        # ``regime_bars`` bars, and the drift is the same sign throughout a
+        # block — a slow, noisy trend, not a straight line.
         drift = np.zeros(bars)
-        d = 0.0
-        for i in range(bars):
-            d = phi * d + rng.normal(0, drift_sd)
-            drift[i] = d
+        block = int(max(20, regime_bars))
+        i = 0
+        sd = sigma * regime_strength
+        while i < bars:
+            length = max(10, int(rng.exponential(block)))
+            direction = rng.choice([-1.0, 0.0, 1.0], p=[0.43, 0.14, 0.43])
+            # shallow trend: the block's daily-equivalent drift is a small
+            # fraction of one daily move, so trends exist but are not free money
+            level = direction * min(abs(rng.normal(0, 1)), 1.5) * sd
+            drift[i:i + length] = level
+            i += length
+        if edge:
+            # opt-in injected edge, used ONLY by the validation self-test to
+            # prove the harness can detect a real edge when one exists
+            drift += edge * sigma
 
-        shocks = (rng.random(bars) < 0.004) * rng.normal(0, 1, bars) * sigma * 5
-        noise = rng.normal(0, 1, bars) * sigma * session + shocks
+        # ---- fat-tailed shocks (rare gaps) -------------------------------
+        shocks = (rng.random(bars) < 0.003) * rng.normal(0, 1, bars) * sigma * 6
 
-        # Random walk with weak mean reversion toward the anchor price, so the
-        # pair stays in a realistic band instead of collapsing to zero.
-        anchor, kappa = inst.base_price, 0.01
+        # ---- price path ---------------------------------------------------
+        raw = rng.normal(0, 1, bars) * vol
+        if autocorr:
+            # Exploration hook: injects genuine, tradeable serial correlation.
+            # Default 0.0 means "no edge"; only the validator's self-test uses
+            # this, to prove the harness can tell an edge from noise.
+            eps = raw
+            raw = np.empty(bars)
+            prev = 0.0
+            for i in range(bars):
+                prev = autocorr * prev + eps[i]
+                raw[i] = prev
+        # Keep the magnitude honest: an AR(1) on the innovation inflates total
+        # variance by 1/(1-a^2). Rescaling so the *price series* keeps its usual
+        # daily volatility means the edge is extra predictability, not extra
+        # risk — otherwise every ATR stop widens and the test measures volatility
+        # instead of edge.
+        scale = 1.0 / math.sqrt(max(1e-9, 1.0 - autocorr ** 2))
+        steps = (raw + (drift + shocks)) * (scale if autocorr else 1.0)
+        anchor, kappa = inst.base_price, 0.004
         close = np.empty(bars)
         px = anchor
         for i in range(bars):
-            px = px + kappa * (anchor - px) + noise[i] + drift[i]
-            close[i] = px
+            px = px + kappa * (anchor - px) + steps[i]
+            close[i] = max(px, inst.pip)
 
         open_ = np.concatenate([[anchor], close[:-1]])
-        wick = np.abs(rng.normal(0, 1, bars)) * sigma * 0.8 * session
+        wick = np.abs(rng.standard_t(df=4, size=bars)) * vol * 0.55
+        wick2 = np.abs(rng.standard_t(df=4, size=bars)) * vol * 0.55
         high = np.maximum(open_, close) + wick
-        low = np.minimum(open_, close) - np.abs(rng.normal(0, 1, bars)) * sigma * 0.8 * session
-        volume = (np.abs(noise) / (sigma + 1e-12) * 1000 * session).round()
+        low = np.minimum(open_, close) - wick2
+        volume = (np.abs(steps) / (vol + 1e-12) * 800 * session).round()
 
         df = pd.DataFrame({"open": open_, "high": high, "low": low,
                            "close": close, "volume": volume}, index=idx)

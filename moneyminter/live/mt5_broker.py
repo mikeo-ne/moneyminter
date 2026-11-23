@@ -136,7 +136,12 @@ class MT5Broker(Broker):
         self.dry_run = dry_run
         self._suffix = symbol_suffix
         self._symbol_cache: Dict[str, str] = {}
+        self._seen_tickets: set[str] = set()
+        self._vanished: set[str] = set()
+        self.rejected: List[dict] = []
         self.trades: List[Trade] = []
+        #: broker symbol name -> requested "EUR/USD", so records are consistent
+        self._display_symbols: Dict[str, str] = {}
         self.equity_curve: List[tuple] = []
 
         kwargs = {}
@@ -190,6 +195,7 @@ class MT5Broker(Broker):
         """Map 'EUR/USD' to the broker's actual symbol, e.g. Exness 'EURUSDm'."""
         if symbol in self._symbol_cache:
             return self._symbol_cache[symbol]
+        self._display_symbols[symbol.replace("/", "").upper() + (self._suffix or "")] = symbol
         base = symbol.replace("/", "").upper()
         candidates = [base + self._suffix] if self._suffix is not None else \
             [base + s for s in _SUFFIXES]
@@ -199,6 +205,7 @@ class MT5Broker(Broker):
                 if not info.visible and not self.mt5.symbol_select(cand, True):
                     continue
                 self._symbol_cache[symbol] = cand
+                self._display_symbols[cand.upper()] = symbol
                 if cand != base:
                     log.info("Resolved %s -> %s", symbol, cand)
                 return cand
@@ -207,9 +214,14 @@ class MT5Broker(Broker):
             if info.name.upper().startswith(base):
                 self.mt5.symbol_select(info.name, True)
                 self._symbol_cache[symbol] = info.name
+                self._display_symbols[info.name.upper()] = symbol
                 return info.name
         raise MT5Error(f"Symbol {symbol} not found on this account (tried {candidates}). "
                        "Check Market Watch, or pass --symbol-suffix.")
+
+    def display_symbol(self, broker_symbol: str) -> str:
+        """Map a broker name ('EURUSDm') back to the user-facing 'EUR/USD'."""
+        return self._display_symbols.get(broker_symbol.upper(), broker_symbol)
 
     def spec(self, symbol: str):
         return self.mt5.symbol_info(self.resolve_symbol(symbol))
@@ -251,6 +263,9 @@ class MT5Broker(Broker):
                 "Use a smaller timeframe/wider stop, or a cent account.",
                 symbol, lots, s.volume_min,
                 (s.volume_min * s.trade_contract_size / units) if units else 0)
+            self.rejected.append({"reason": "below broker minimum lot", "symbol": symbol,
+                                  "wanted_lots": round(lots, 4),
+                                  "min_lot": s.volume_min})
             return 0.0
         return round(min(lots, s.volume_max), 2)
 
@@ -275,11 +290,15 @@ class MT5Broker(Broker):
                 else:
                     request["price"] = tick.bid
                 continue
+            self.rejected.append({"retcode": result.retcode, "comment": result.comment,
+                                  "symbol": request.get("symbol"),
+                                  "volume": request.get("volume"),
+                                  "type": request.get("type")})
             raise MT5Error(f"Order rejected: retcode={result.retcode} {result.comment}")
         raise MT5Error("Order failed after retries")
 
     def open(self, symbol, side: Side, units, price=None, ts=None,
-             stop_loss=None, take_profit=None, strategy=""):
+             stop_loss=None, take_profit=None, strategy="", **mgmt):
         broker_sym = self.resolve_symbol(symbol)
         lots = self.units_to_lots(symbol, units)
         if lots <= 0:
@@ -310,9 +329,17 @@ class MT5Broker(Broker):
         result = self._send(req)
         if result is None:
             return None
+        # store exactly what the broker was told, so trailing maths and the UI
+        # never drift from the live stop by sub-pip float dust
+        stop_loss = round(float(stop_loss), s.digits) if stop_loss else None
+        take_profit = round(float(take_profit), s.digits) if take_profit else None
         pos = Position(symbol=symbol, side=side, units=lots * s.trade_contract_size,
                        entry_price=float(result.price or entry), opened_at=ts or utcnow(),
-                       stop_loss=stop_loss, take_profit=take_profit, strategy=strategy)
+                       stop_loss=stop_loss, take_profit=take_profit, strategy=strategy,
+                       initial_stop=stop_loss,
+                       trail_atr=mgmt.get("trail_atr"),
+                       breakeven_at_r=mgmt.get("breakeven_at_r"),
+                       max_bars=mgmt.get("max_bars"))
         pos.id = str(result.order)
         log.info("OPEN %s %s %.2f lots @ %.5f (ticket %s)", broker_sym, side.value,
                  lots, pos.entry_price, result.order)
@@ -353,11 +380,48 @@ class MT5Broker(Broker):
         # realised profit as the broker computed it (includes swap + commission)
         pnl = float(live.profit + live.swap)
         trade = Trade(position.symbol, position.side, position.units, position.entry_price,
-                      exit_px, position.opened_at, ts or utcnow(), pnl, reason, position.strategy)
+                      exit_px, position.opened_at, ts or utcnow(), pnl, reason,
+                      position.strategy, initial_stop=position.initial_stop)
         self.trades.append(trade)
         log.info("CLOSE %s @ %.5f  P&L %.2f %s (%s)", broker_sym, exit_px, pnl,
                  self.currency, reason)
         return trade
+
+    def modify_stop(self, position: Position, new_stop: float,
+                    take_profit: Optional[float] = None) -> bool:
+        """Re-send the broker-side stop-loss (used for trailing stops).
+
+        A stop that only exists in Python is not a stop — if the machine dies
+        the position is naked. So every trail step is pushed to the broker.
+        """
+        broker_sym = self.resolve_symbol(position.symbol)
+        live = self._find_mt5_position(position)
+        if live is None:
+            raise MT5Error(f"Position {position.id} not found on the terminal")
+        s = self.spec(position.symbol)
+        tp = take_profit if take_profit is not None else (live.tp or 0.0)
+        req = {
+            "action": self.mt5.TRADE_ACTION_SLTP,
+            "symbol": broker_sym,
+            "position": live.ticket,
+            "sl": round(float(new_stop), s.digits),
+            "tp": round(float(tp), s.digits) if tp else 0.0,
+        }
+        result = self._send(req)
+        if result is None:
+            return False
+        log.info("STOP %s -> %.5f (ticket %s)", broker_sym, new_stop, live.ticket)
+        return True
+
+    def close_all(self, reason: str = "flatten") -> list:
+        """Close every position this robot owns."""
+        out = []
+        for p in list(self.positions.values()):
+            try:
+                out.append(self.close(p, reason=reason))
+            except MT5Error as exc:
+                log.error("close_all failed for %s: %s", p.symbol, exc)
+        return out
 
     def _find_mt5_position(self, position: Position):
         for p in (self.mt5.positions_get(symbol=self.resolve_symbol(position.symbol)) or []):
@@ -370,20 +434,36 @@ class MT5Broker(Broker):
     def positions(self) -> Dict[str, Position]:
         """Live positions opened by this robot, keyed by ticket."""
         out: Dict[str, Position] = {}
+        current = set()
         for p in (self.mt5.positions_get() or []):
             if p.magic != self.magic:
                 continue  # never touch trades we did not open
             s = self.mt5.symbol_info(p.symbol)
             pos = Position(
-                symbol=p.symbol, side=Side.BUY if p.type == self.mt5.POSITION_TYPE_BUY else Side.SELL,
+                symbol=self.display_symbol(p.symbol),
+                side=Side.BUY if p.type == self.mt5.POSITION_TYPE_BUY else Side.SELL,
                 units=p.volume * (s.trade_contract_size if s else 100_000),
                 entry_price=p.price_open,
                 opened_at=datetime.fromtimestamp(p.time, tz=timezone.utc),
                 stop_loss=p.sl or None, take_profit=p.tp or None,
-                strategy=(p.comment or "").replace("MM:", ""))
+                strategy=(p.comment or "").replace("MM:", ""),
+                initial_stop=p.sl or None)
             pos.id = str(p.ticket)
+            current.add(pos.id)
             out[pos.id] = pos
+        # remember tickets that were open last time we looked and are now gone:
+        # the broker closed them (SL/TP) or a human did, and reconciliation
+        # needs to report that rather than silently losing the trade
+        if getattr(self, "_seen_tickets", None) is not None:
+            self._vanished = getattr(self, "_seen_tickets", set()) - current
+        self._seen_tickets = current
         return out
+
+    def drain_vanished(self) -> Dict[str, dict]:
+        """Tickets that disappeared since the previous ``positions`` read."""
+        gone = getattr(self, "_vanished", set())
+        self._vanished = set()
+        return {t: {"ticket": t} for t in gone}
 
     def equity(self, prices=None) -> float:
         """Current account equity.

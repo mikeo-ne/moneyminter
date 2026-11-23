@@ -33,12 +33,17 @@ class Strategy(ABC):
     """Base strategy.
 
     ``prepare`` computes indicator columns once (vectorised), ``on_bar`` is
-    called per bar with the history up to and including the current bar.
+    called per closed bar with the history up to and including the current bar.
+
+    A strategy must never look at future rows. The contract is: the last row of
+    ``df`` is the just-closed bar and is the only source of a decision.
     """
 
     name: str = "base"
     #: minimum bars required before signals are produced
     warmup: int = 50
+    #: short human description shown in the UI
+    style: str = "generic"
     params: dict
 
     def __init__(self, **params):
@@ -53,9 +58,14 @@ class Strategy(ABC):
     def on_bar(self, df: pd.DataFrame, position: Optional[Position]) -> Signal:
         ...
 
+    # ---- signal helpers --------------------------------------------------
     def flat(self, symbol: str, reason: str = "") -> Signal:
         return Signal(SignalType.FLAT, symbol, reason=reason)
 
+    def close(self, symbol: str, reason: str = "") -> Signal:
+        return Signal(SignalType.CLOSE, symbol, reason=reason)
+
     def describe(self) -> dict:
         return {"name": self.name, "params": self.params, "warmup": self.warmup,
+                "style": self.style,
                 "doc": (self.__doc__ or "").strip().split("\n")[0]}

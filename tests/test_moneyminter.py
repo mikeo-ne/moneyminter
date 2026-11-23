@@ -63,6 +63,45 @@ def test_position_size_respects_risk_budget():
     assert loss == pytest.approx(200, rel=0.01)
 
 
+def test_position_size_converts_quote_currency_to_usd():
+    """A 20-pip stop on USD/JPY must not be over-sized by the JPY rate.
+
+    P&L on USD/JPY settles in JPY, so 1 unit of risk needs ``1/USDJPY`` USD of
+    conversion. Ignoring it over-risks by ~150x on a JPY pair.
+    """
+    rm = RiskManager(RiskConfig(risk_per_trade=0.01, use_confidence_sizing=False,
+                                max_leverage=1_000))
+    inst = get_instrument("USD/JPY")                      # 151.20, pip 0.01
+    entry, stop = 151.20, 151.00                           # 20-pip stop
+    units = rm.position_size(10_000, entry, stop, inst)
+    # $100 risk / (0.20 JPY per unit / 151.20 JPY per USD) = 75,600 units
+    assert units == pytest.approx(75_600, rel=0.02)
+    # one unit of USD/JPY is exactly $1 of notional, so a 50x cap still allows
+    # 500k units — the risk budget, not leverage, is the binding constraint here
+    rm_tight = RiskManager(RiskConfig(risk_per_trade=0.01, use_confidence_sizing=False,
+                                      max_leverage=50))
+    assert rm_tight.position_size(10_000, entry, stop, inst) == pytest.approx(
+        75_600, rel=0.02)
+
+
+def test_leverage_cap_uses_usd_notional_not_raw_price():
+    """EUR/USD at 1.10: 1 unit is $1.10 notional, so a 10x cap on $10k is
+    ~90,909 units — not the 100,000 a naive equity*leverage/price gives."""
+    rm = RiskManager(RiskConfig(risk_per_trade=0.5, use_confidence_sizing=False,
+                                max_leverage=10))
+    inst = get_instrument("EUR/USD")
+    units = rm.position_size(10_000, 1.10, 1.0999, inst)   # 1-pip stop: huge
+    assert units == pytest.approx(10_000 * 10 / 1.10, rel=0.001)
+
+
+def test_leverage_cap_can_reduce_size_below_risk_target():
+    rm = RiskManager(RiskConfig(risk_per_trade=0.02, use_confidence_sizing=False,
+                                max_leverage=5))
+    inst = get_instrument("EUR/USD")
+    units = rm.position_size(10_000, 1.1000, 1.0980, inst)
+    assert units == pytest.approx(10_000 * 5 / 1.1, rel=0.01)   # capped
+
+
 def test_risk_guardrails_block_trading():
     rm = RiskManager(RiskConfig(max_positions=2, max_daily_loss=0.05))
     today = utcnow().date()
@@ -178,3 +217,49 @@ def test_web_api_endpoints():
         assert r.status_code == 200 and "metrics" in r.json()
         assert c.post("/api/start", json={"symbols": ["EUR/USD"], "speed": 2000}).json()["ok"]
         assert c.post("/api/stop").json()["ok"]
+
+
+# ------------------------------------------------- new web api surface
+def test_web_demo_and_validation_endpoints():
+    """The dashboard's demo-sim and validation endpoints must round-trip."""
+    import time
+
+    from fastapi.testclient import TestClient
+    from moneyminter.web.app import create_app
+
+    with TestClient(create_app(BotConfig(journal_path=None), autostart=False)) as c:
+        meta = c.get("/api/meta").json()
+        assert "demo-sim" in meta["modes"]
+        assert "trend_pullback" in meta["strategies"]
+
+        v = c.post("/api/validate", json={"strategy": "donchian_trend",
+                                          "samples": 3, "bars": 1200})
+        assert v.status_code == 200
+        body = v.json()
+        assert body["summary"]["verdict"] in ("validated", "promising", "rejected")
+        assert body["summary"]["score"] <= 100
+        assert len(body["samples"]) == 3
+
+        assert c.post("/api/demo/start",
+                      json={"symbols": ["EUR/USD"], "strategy": "squeeze_momentum",
+                            "bars_per_poll": 3}).status_code == 200
+        time.sleep(0.5)
+        st = c.get("/api/demo/state").json()
+        assert st["mode"] == "sim"
+        for t in st["trades"]:
+            assert t["side"] in ("BUY", "SELL")
+        assert c.post("/api/demo/stop").status_code == 200
+
+
+def test_web_report_is_json_safe_with_infinite_profit_factor():
+    """A run with no losing trades yields profit_factor=inf; JSON has no inf."""
+    import json
+
+    from fastapi.testclient import TestClient
+    from moneyminter.web.app import create_app
+
+    with TestClient(create_app(BotConfig(journal_path=None), autostart=False)) as c:
+        r = c.post("/api/backtest", json={"symbol": "EUR/USD", "strategy": "breakout",
+                                          "bars": 900, "seed": 4})
+        assert r.status_code == 200
+        json.dumps(r.json())            # must not raise on inf/nan

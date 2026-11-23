@@ -10,6 +10,21 @@ import numpy as np
 from .models import Trade
 
 
+#: profit factor is genuinely infinite when there are no losses; JSON has no
+#: infinity, so cap it at a clearly-labelled large number instead of failing
+INF_CAP = 999.0
+
+
+def _json_float(v):
+    if isinstance(v, float):
+        if math.isnan(v):
+            return 0.0
+        if math.isinf(v):
+            return INF_CAP if v > 0 else -INF_CAP
+        return round(v, 4)
+    return v
+
+
 @dataclass
 class Metrics:
     initial_balance: float
@@ -35,7 +50,7 @@ class Metrics:
     exposure_pct: float
 
     def to_dict(self) -> dict:
-        return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in asdict(self).items()}
+        return {k: _json_float(v) for k, v in asdict(self).items()}
 
     def summary(self) -> str:
         d = self.to_dict()

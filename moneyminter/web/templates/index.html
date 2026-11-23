@@ -12,61 +12,160 @@
   <div class="status"><span id="dot" class="dot"></span><span id="statusText">connecting…</span></div>
 </header>
 
-<section class="controls">
-  <label>Strategy <select id="strategy"></select></label>
-  <label>Timeframe <select id="timeframe"></select></label>
-  <label>Balance <input id="balance" type="number" value="10000" step="1000"/></label>
-  <label>Risk/trade % <input id="risk" type="number" value="1" step="0.25"/></label>
-  <label>Speed ×<input id="speed" type="number" value="60" step="10"/></label>
-  <label class="pairs">Pairs <div id="pairs" class="chips"></div></label>
-  <div class="buttons">
-    <button id="startBtn" class="primary">▶ Start bot</button>
-    <button id="stopBtn" class="danger">■ Stop</button>
-    <button id="btBtn">⚗ Backtest</button>
+<nav class="tabs">
+  <button class="tab active" data-panel="paper">Paper trading</button>
+  <button class="tab" data-panel="demo">Demo account</button>
+  <button class="tab" data-panel="research">Research &amp; validation</button>
+</nav>
+
+<!-- ============================ PAPER ============================ -->
+<section id="panel-paper" class="panel active">
+  <div class="controls">
+    <label>Strategy <select id="strategy"></select></label>
+    <label>Timeframe <select id="timeframe"></select></label>
+    <label>Balance <input id="balance" type="number" value="10000" step="1000"/></label>
+    <label>Risk/trade % <input id="risk" type="number" value="0.5" step="0.25"/></label>
+    <label>Speed ×<input id="speed" type="number" value="60" step="10"/></label>
+    <label class="pairs">Pairs <div id="pairs" class="chips"></div></label>
+    <div class="buttons">
+      <button id="startBtn" class="primary">▶ Start bot</button>
+      <button id="stopBtn" class="danger">■ Stop</button>
+    </div>
   </div>
+
+  <section class="kpis">
+    <div class="kpi"><span>Equity</span><b id="equity">–</b></div>
+    <div class="kpi"><span>P&amp;L</span><b id="pnl">–</b></div>
+    <div class="kpi"><span>Open positions</span><b id="openCount">–</b></div>
+    <div class="kpi"><span>Trades</span><b id="tradeCount">–</b></div>
+    <div class="kpi"><span>Win rate</span><b id="winRate">–</b></div>
+    <div class="kpi"><span>Drawdown</span><b id="dd">–</b></div>
+  </section>
+
+  <section class="grid">
+    <div class="card wide">
+      <h3>Equity curve</h3>
+      <canvas id="equityChart" height="230"></canvas>
+    </div>
+    <div class="card">
+      <h3>Live prices</h3>
+      <table id="pricesTable"><tbody></tbody></table>
+    </div>
+    <div class="card wide">
+      <h3>Open positions</h3>
+      <table id="positions">
+        <thead><tr><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th><th>Now</th>
+          <th>Pips</th><th>P&amp;L</th><th>SL / TP</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Activity</h3>
+      <ul id="events" class="events"></ul>
+    </div>
+    <div class="card wide">
+      <h3>Trade history</h3>
+      <table id="trades">
+        <thead><tr><th>Closed</th><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th>
+          <th>Exit</th><th>P&amp;L</th><th>Reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
 </section>
 
-<section class="kpis">
-  <div class="kpi"><span>Equity</span><b id="equity">–</b></div>
-  <div class="kpi"><span>P&amp;L</span><b id="pnl">–</b></div>
-  <div class="kpi"><span>Open positions</span><b id="openCount">–</b></div>
-  <div class="kpi"><span>Trades</span><b id="tradeCount">–</b></div>
-  <div class="kpi"><span>Win rate</span><b id="winRate">–</b></div>
-  <div class="kpi"><span>Drawdown</span><b id="dd">–</b></div>
+<!-- ============================ DEMO ============================= -->
+<section id="panel-demo" class="panel">
+  <div class="notice">
+    <b>This runs the real live code path.</b> Orders, broker-side stops, trailing
+    and server-side reconciliation all execute — against a simulated MetaTrader 5
+    terminal instead of a broker. It proves the plumbing works. It says nothing
+    about profitability.
+  </div>
+  <div class="controls">
+    <label>Strategy <select id="dStrategy"></select></label>
+    <label>Timeframe <select id="dTimeframe"></select></label>
+    <label>Balance <input id="dBalance" type="number" value="10000" step="1000"/></label>
+    <label>Risk/trade % <input id="dRisk" type="number" value="0.5" step="0.25"/></label>
+    <label>Bars / cycle <input id="dBarsPerPoll" type="number" value="2" step="1"/></label>
+    <label class="pairs">Pairs <div id="dPairs" class="chips"></div></label>
+    <div class="buttons">
+      <button id="dStart" class="primary">▶ Start demo session</button>
+      <button id="dStop" class="danger">■ Stop &amp; flatten</button>
+    </div>
+  </div>
+
+  <section class="kpis">
+    <div class="kpi"><span>Mode</span><b id="dMode">idle</b></div>
+    <div class="kpi"><span>Equity</span><b id="dEquity">–</b></div>
+    <div class="kpi"><span>Realised P&amp;L</span><b id="dPnl">–</b></div>
+    <div class="kpi"><span>Trades</span><b id="dTrades">–</b></div>
+    <div class="kpi"><span>Win rate</span><b id="dWinRate">–</b></div>
+    <div class="kpi"><span>Avg R</span><b id="dAvgR">–</b></div>
+  </section>
+
+  <section class="grid">
+    <div class="card wide">
+      <h3>Demo equity (realised)</h3>
+      <canvas id="demoChart" height="200"></canvas>
+    </div>
+    <div class="card">
+      <h3>Demo activity</h3>
+      <ul id="dEvents" class="events"></ul>
+    </div>
+    <div class="card wide">
+      <h3>Broker positions</h3>
+      <table id="dPositions">
+        <thead><tr><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th><th>Now</th>
+          <th>P&amp;L</th><th>R</th><th>SL / TP</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card wide">
+      <h3>Demo trades (including broker stop-outs)</h3>
+      <table id="dTradesTable">
+        <thead><tr><th>Closed</th><th>Pair</th><th>Side</th><th>Entry</th><th>Exit</th>
+          <th>P&amp;L</th><th>R</th><th>Reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
 </section>
 
-<section class="grid">
-  <div class="card wide">
-    <h3>Equity curve</h3>
-    <canvas id="equityChart" height="230"></canvas>
+<!-- ========================== RESEARCH =========================== -->
+<section id="panel-research" class="panel">
+  <div class="notice">
+    A backtest is a hypothesis, not evidence. <b>Validation</b> re-tests the same
+    strategy across many independent price samples, runs out-of-sample
+    walk-forward folds, reshuffles the trade order (Monte Carlo), and doubles the
+    spread to see whether the edge is real or just cheaper-than-the-spread noise.
+    Note the data source: the offline simulator is calibrated to have
+    <i>no exploitable edge</i>, so on synthetic data the honest answer is
+    usually “rejected”.
   </div>
-  <div class="card">
-    <h3>Live prices</h3>
-    <table id="pricesTable"><tbody></tbody></table>
+  <div class="controls">
+    <label>Strategy <select id="rStrategy"></select></label>
+    <label>Timeframe <select id="rTimeframe"></select></label>
+    <label>Samples <input id="rSamples" type="number" value="8" step="1"/></label>
+    <label>Bars <input id="rBars" type="number" value="2500" step="500"/></label>
+    <div class="buttons">
+      <button id="btBtn">⚗ Backtest</button>
+      <button id="vBtn" class="primary">✓ Validate</button>
+    </div>
   </div>
-  <div class="card wide">
-    <h3>Open positions</h3>
-    <table id="positions">
-      <thead><tr><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th><th>Now</th><th>Pips</th><th>P&amp;L</th><th>SL / TP</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-  <div class="card">
-    <h3>Activity</h3>
-    <ul id="events" class="events"></ul>
-  </div>
-  <div class="card wide">
-    <h3>Trade history</h3>
-    <table id="trades">
-      <thead><tr><th>Closed</th><th>Pair</th><th>Side</th><th>Units</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Reason</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-  <div class="card" id="btCard">
-    <h3>Backtest report</h3>
-    <div id="btOut" class="muted">Run a backtest to see performance metrics.</div>
-  </div>
+
+  <section class="grid">
+    <div class="card">
+      <h3>Backtest report</h3>
+      <div id="btOut" class="muted">Run a backtest to see performance metrics.</div>
+    </div>
+    <div class="card">
+      <h3>Validation verdict</h3>
+      <div id="vOut" class="muted">Validate a strategy to see the evidence.</div>
+    </div>
+  </section>
 </section>
+
 <script src="/static/app.js"></script>
 </body>
 </html>
