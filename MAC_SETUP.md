@@ -479,6 +479,85 @@ regardless of how good the equity curve looks.
 
 ---
 
+## Using your friend's VPS
+
+The cheapest route, and it works — the VPS provider never knows or cares whose
+account runs inside MetaTrader. A few things to get right:
+
+### 1. Your friend has full control of that machine
+
+This is not a technicality. Whoever holds the VPS control panel (the provider
+login) can:
+
+- reset the Windows password and log in to the desktop while your bot runs
+- read the `run.jsonl` journal and every log you write
+- install a keylogger or a screen recorder and capture your **Exness demo login**
+- snapshot the disk, and read it later at leisure
+
+**Never put a real-money account on a machine you do not control.** Demo only —
+which is exactly what you're doing, so the worst case here is embarrassing rather
+than expensive.
+
+Practical rules:
+
+| Do | Why |
+|---|---|
+| Use a **demo** account, never live | Your friend can read the credentials |
+| Create a **separate Exness demo** just for the VPS | Don't reuse a login you care about |
+| Change the VPS admin password the moment you take it over | Or ask your friend to set a fresh one and not keep it |
+| Don't store broker email/2FA on that machine | It's simply readable |
+
+### 2. Set a dashboard password — it is automatic now
+
+The dashboard has no login of its own, so anyone who can reach port 8000 can
+stop your bot with one request. Money Minter now **requires a password whenever
+it binds to `0.0.0.0`**, and prints one if you don't supply it:
+
+```bash
+MM_DASH_PASSWORD='pick-something-long' \
+  python -m moneyminter dashboard --host 0.0.0.0 --port 8000
+```
+
+or explicitly:
+
+```bash
+python -m moneyminter dashboard --host 0.0.0.0 --port 8000 \
+    --user me --password 'pick-something-long'
+```
+
+Better still, don't expose it at all — tunnel over SSH from your machine:
+
+```bash
+ssh -L 8000:127.0.0.1:8000 yourfriend@vps-ip
+# then open http://127.0.0.1:8000 locally — nothing is exposed to the internet
+```
+
+### 3. Don't use your friend's MT5 if it's already configured
+
+Two MT5 terminals in one Wine/Windows profile fight over the same data directory.
+Install a second one, or make sure the terminal is logged into **your** demo
+account, not theirs. If they already have MT5 running, ask them to close it.
+
+### 4. Make sure it actually suits the job
+
+| Requirement | Why it matters |
+|---|---|
+| **Windows Server** (not Linux) | MT5's Python API is Windows-only; a Linux VPS needs the Wine path you just escaped |
+| Always on, no sleep | A laptop-style VM that suspends stops trailing stops |
+| ~2 GB RAM, 2 cores | MT5 plus Python is comfortable; 1 GB is tight |
+| Low latency to your broker | Fine for `trend_pullback` on M5; matters for scalping |
+
+Exness servers are in London and New York. A VPS in those regions gets ~5 ms,
+which is plenty. A cheap European box is a few tens of milliseconds — irrelevant
+for this strategy.
+
+### 5. Sharing the cost
+
+Less a concern than the security one, but be explicit about who pays and who
+owns the account: if the provider login is in your friend's name, **they own the
+machine**, and one day it may vanish on short notice. For a four-week demo test
+that's fine. Don't build something you depend on and leave it there indefinitely.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -493,6 +572,8 @@ regardless of how good the equity curve looks.
 | `Order rejected: retcode=10019` | Not enough free margin for that lot size — lower `--risk` |
 | `No module named mt5_mac` | `pip install mt5_mac` in the activated venv |
 | Lost / can't tell what's wrong | `python -m moneyminter doctor` |
+| Dashboard asks for a password | Expected on `--host 0.0.0.0`. Use `MM_DASH_PASSWORD`, or `--no-auth` on loopback only |
+| `401 Authentication required` from curl | Pass `-u user:password` |
 | `initialize() failed` | MT5 not running, or not logged in. Launch it manually first |
 | `Algo Trading is disabled` | Toolbar button green **and** Tools → Options → Expert Advisors ticked |
 | `Symbol EURUSD not found` | Market Watch (`Ctrl+M`) → right-click → **Show All** |

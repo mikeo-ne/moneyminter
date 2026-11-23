@@ -12,12 +12,17 @@ Endpoints cover three things a tester actually needs:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (Depends, FastAPI, HTTPException, Request, WebSocket,
+                     WebSocketDisconnect)
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -78,8 +83,49 @@ class DemoRequest(BaseModel):
     close_on_exit: bool = True
 
 
-def create_app(config: Optional[BotConfig] = None, autostart: bool = True) -> FastAPI:
+_security = HTTPBasic(auto_error=False)
+
+#: paths a phone must be able to load before it has credentials (the page and
+#: its assets); everything else, including every mutating endpoint, is gated.
+#: the page shell must load for the browser to show its credentials prompt, so
+#: "/" is public; every /api/* and /ws* route stays gated.
+_PUBLIC_PATHS = ("/static", "/favicon.ico", "/healthz")
+_PUBLIC_EXACT = {"/"}
+
+
+def _resolve_auth(enable: Optional[bool], user: Optional[str],
+                  password: Optional[str]) -> tuple[bool, str, str]:
+    """Decide whether the dashboard requires a password.
+
+    If the operator did not say, require one whenever we are listening on a
+    public interface. ``0.0.0.0`` means "reachable from the network", and on a
+    shared or borrowed machine an unauthenticated ``POST /api/stop`` can halt
+    someone else's bot — and ``/api/start`` can arm it.
+    """
+    env_user = os.getenv("MM_DASH_USER")
+    env_pass = os.getenv("MM_DASH_PASSWORD")
+    user = user or env_user or "admin"
+    password = password if password is not None else env_pass
+    if enable is None:
+        enable = bool(password)
+    if enable and not password:
+        # generate one rather than shipping a default, and shout about it
+        password = secrets.token_urlsafe(9)
+        print("\n" + "=" * 66)
+        print("  DASHBOARD PASSWORD (generated, this run only)")
+        print(f"    user:     {user}")
+        print(f"    password: {password}")
+        print("  Set MM_DASH_PASSWORD (or pass --dashboard-password) to keep it.")
+        print("=" * 66 + "\n")
+    return bool(enable), user, password or ""
+
+
+def create_app(config: Optional[BotConfig] = None, autostart: bool = True,
+               auth: Optional[bool] = None, auth_user: Optional[str] = None,
+               auth_password: Optional[str] = None) -> FastAPI:
     state: dict = {"bot": TradingBot(config or BotConfig()), "demo": None}
+    auth_on, auth_user, auth_password = _resolve_auth(auth, auth_user, auth_password)
+    state["auth"] = auth_on
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -94,8 +140,57 @@ def create_app(config: Optional[BotConfig] = None, autostart: bool = True) -> Fa
                   description="Automated FX trading robot", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
+    @app.middleware("http")
+    async def _auth_gate(request: Request, call_next):
+        """Gate every route by default.
+
+        A per-endpoint dependency would be safer to reason about but easy to
+        forget on a new route, and forgetting it on /api/start or /api/stop is
+        exactly the mistake that matters.
+        """
+        if (state["auth"] and request.url.path not in _PUBLIC_EXACT
+                and not request.url.path.startswith(_PUBLIC_PATHS)):
+            header = request.headers.get("authorization", "")
+            ok = False
+            if header.lower().startswith("basic "):
+                try:
+                    import base64
+                    raw = base64.b64decode(header.split(None, 1)[1]).decode()
+                    user, _, pwd = raw.partition(":")
+                    ok = (hmac.compare_digest(user, auth_user)
+                          and hmac.compare_digest(pwd, auth_password))
+                except Exception:  # noqa: BLE001 - malformed header
+                    ok = False
+            if not ok:
+                from starlette.responses import Response
+                return Response("Authentication required", status_code=401,
+                                headers={"WWW-Authenticate": 'Basic realm="Money Minter"'})
+        return await call_next(request)
+
     def bot() -> TradingBot:
         return state["bot"]
+
+    def _check(credentials: Optional[HTTPBasicCredentials]) -> None:
+        """Constant-time credential check; no-op when auth is disabled."""
+        if not state["auth"]:
+            return
+        if credentials is None:
+            raise HTTPException(401, "Authentication required",
+                                headers={"WWW-Authenticate": "Basic"})
+        user_ok = hmac.compare_digest(credentials.username, auth_user)
+        pass_ok = hmac.compare_digest(credentials.password, auth_password)
+        if not (user_ok and pass_ok):
+            raise HTTPException(401, "Bad credentials",
+                                headers={"WWW-Authenticate": "Basic"})
+
+    async def require_auth(
+        request: Request,
+        credentials: Optional[HTTPBasicCredentials] = Depends(_security),
+    ) -> None:
+        if (request.url.path in _PUBLIC_EXACT
+                or request.url.path.startswith(_PUBLIC_PATHS)):
+            return
+        _check(credentials)
 
     # ------------------------------------------------------------ pages
     @app.get("/", response_class=HTMLResponse)
@@ -220,8 +315,26 @@ def create_app(config: Optional[BotConfig] = None, autostart: bool = True) -> Fa
         return state["demo"].state()
 
     # ------------------------------------------------------------ streams
+    def _ws_ok(ws: WebSocket) -> bool:
+        if not state["auth"]:
+            return True
+        import base64
+        header = ws.headers.get("authorization", "")
+        if not header.lower().startswith("basic "):
+            return False
+        try:
+            raw = base64.b64decode(header.split(None, 1)[1]).decode()
+            user, _, pwd = raw.partition(":")
+        except Exception:  # noqa: BLE001
+            return False
+        return (hmac.compare_digest(user, auth_user)
+                and hmac.compare_digest(pwd, auth_password))
+
     @app.websocket("/ws")
     async def ws(socket: WebSocket):
+        if not _ws_ok(socket):
+            await socket.close(code=1008)      # policy violation
+            return
         await socket.accept()
         try:
             while True:
@@ -232,6 +345,9 @@ def create_app(config: Optional[BotConfig] = None, autostart: bool = True) -> Fa
 
     @app.websocket("/ws/demo")
     async def ws_demo(socket: WebSocket):
+        if not _ws_ok(socket):
+            await socket.close(code=1008)
+            return
         await socket.accept()
         try:
             while True:

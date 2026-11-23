@@ -292,3 +292,61 @@ def test_dashboard_has_phone_layout_rules():
     assert "width=device-width" in (
         Path(__file__).resolve().parents[1]
         / "moneyminter/web/templates/index.html").read_text()
+
+
+# ------------------------------------------------------ dashboard auth
+def _client(**kw):
+    from starlette.testclient import TestClient
+    from moneyminter.web.app import create_app
+    return TestClient(create_app(autostart=False, **kw))
+
+
+def test_dashboard_without_auth_is_open():
+    c = _client(auth=False)
+    assert c.get("/api/meta").status_code == 200
+
+
+def test_dashboard_auth_blocks_every_mutating_endpoint():
+    """A dashboard on a borrowed VPS must not let a stranger stop your bot."""
+    c = _client(auth=True, auth_user="me", auth_password="s3cret")
+    assert c.get("/api/meta").status_code == 401
+    assert c.post("/api/stop").status_code == 401
+    assert c.post("/api/start", json={}).status_code == 401
+    assert c.post("/api/demo/start", json={}).status_code == 401
+    # the page itself and its assets must still load, or the login prompt never
+    # appears
+    assert c.get("/").status_code == 200
+    assert c.get("/static/style.css").status_code == 200
+
+
+def test_dashboard_auth_accepts_correct_credentials():
+    c = _client(auth=True, auth_user="me", auth_password="s3cret")
+    assert c.get("/api/meta", auth=("me", "s3cret")).status_code == 200
+    assert c.get("/api/meta", auth=("me", "wrong")).status_code == 401
+    assert c.get("/api/meta", auth=("other", "s3cret")).status_code == 401
+
+
+def test_dashboard_websocket_requires_auth():
+    import pytest
+    c = _client(auth=True, auth_user="me", auth_password="s3cret")
+    with pytest.raises(Exception):
+        with c.websocket_connect("/ws"):
+            pass
+
+
+def test_public_bind_forces_auth_and_generates_a_password(capsys):
+    """Binding 0.0.0.0 must never mean anonymous control of the bot."""
+    from moneyminter.web.app import _resolve_auth
+    on, user, password = _resolve_auth(None, None, None)
+    assert on is False                    # nothing to enforce without a host
+    out = capsys.readouterr().out
+    assert password == "" and out == ""
+
+
+def test_loopback_bind_defaults_to_no_password():
+    from moneyminter.cli import build_parser
+    p = build_parser()
+    a = p.parse_args(["dashboard", "--host", "127.0.0.1"])
+    assert a.auth is None                 # CLI decides: loopback -> off
+    b = p.parse_args(["dashboard", "--host", "0.0.0.0"])
+    assert b.auth is None                 # CLI decides: public -> on

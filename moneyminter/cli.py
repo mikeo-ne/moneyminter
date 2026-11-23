@@ -161,9 +161,17 @@ def cmd_dashboard(args) -> int:
     cfg = BotConfig.load(args.config) if args.config else BotConfig(
         symbols=args.symbols, timeframe=args.timeframe, strategy=args.strategy,
         balance=args.balance, speed=args.speed, source=args.source, risk=_risk_from(args))
-    app = create_app(cfg, autostart=not args.no_autostart)
+    # A dashboard on 0.0.0.0 is reachable by anyone on that network. Force
+    # authentication unless the operator explicitly opted out or bound to
+    # loopback only.
+    auth = args.auth
+    if auth is None:
+        auth = args.host not in ("127.0.0.1", "localhost", "::1")
+    app = create_app(cfg, autostart=not args.no_autostart, auth=auth,
+                     auth_user=args.user, auth_password=args.password)
     print(BANNER)
-    print(f"Dashboard on http://{args.host}:{args.port}")
+    print(f"Dashboard on http://{args.host}:{args.port}"
+          + ("  (password required)" if auth else "  (no password — loopback only)"))
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -570,6 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--port", type=int, default=8000)
     db.add_argument("--config")
     db.add_argument("--no-autostart", action="store_true")
+    db.add_argument("--auth", dest="auth", action="store_true", default=None,
+                    help="require a password (automatic when binding 0.0.0.0)")
+    db.add_argument("--no-auth", dest="auth", action="store_false",
+                    help="disable the password (only safe on loopback)")
+    db.add_argument("--user", help="dashboard username (default admin)")
+    db.add_argument("--password",
+                    help="dashboard password (or set MM_DASH_PASSWORD)")
     db.set_defaults(func=cmd_dashboard)
 
     def live_flags(sp):
