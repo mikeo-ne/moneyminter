@@ -189,6 +189,26 @@ def diagnose_mac_app(app_path: str) -> str:
         pass
     return "\n".join(lines)
 
+def diagnose_mac_bundle(app_path: str) -> tuple[bool, str]:
+    """Is this bundle usable by a Python driver? Returns (ok, explanation).
+
+    Matters because "MT5.app exists" and "MT5 can be driven from Python" are
+    different questions, and ``doctor`` used to report the first as if it were
+    the second.
+    """
+    wine = find_wine_binary(app_path)
+    if wine is not None:
+        return True, f"wine: {os.path.relpath(wine, app_path)}"
+    report = diagnose_mac_app(app_path)
+    return False, (
+        "The bundle is installed but contains no Wine runtime, so no Python "
+        "driver (mt5_mac) can attach to it.\n"
+        "For a Windows VM this is not needed — MT5 there is native. On the Mac\n"
+        "itself the options are a Windows VPS, or reinstall MT5.\n\n"
+        + report
+    )
+
+
 def _patch_mt5_mac_app(app_path: str) -> None:
     """Point the ``mt5_mac`` module at ``app_path``.
 

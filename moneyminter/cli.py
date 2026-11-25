@@ -328,6 +328,7 @@ def cmd_doctor(args) -> int:
     """Check every prerequisite for connecting to MetaTrader 5, one by one."""
     import importlib
     import os
+    import platform as _platform
     import sys as _sys
 
     print(BANNER)
@@ -342,8 +343,20 @@ def cmd_doctor(args) -> int:
 
     print("Environment")
     line(True, "Platform",
-         f"{_sys.platform} " +
-         ("(macOS)" if _sys.platform == "darwin" else "(MT5 needs Windows, or macOS+mt5_mac)"))
+         f"{_sys.platform} {_platform.machine()} " +
+         ("(macOS)" if _sys.platform == "darwin" else
+          "(MT5 needs Windows, or macOS+mt5_mac)"))
+
+    # The single most confusing setup: MT5 installed in an ARM Windows VM on an
+    # Apple Silicon Mac. The terminal runs, but the Python API is x86-64 only,
+    # so no driver can ever attach — the error surfaces as "no backend".
+    if _sys.platform == "win32" and _platform.machine().lower() in ("arm64", "aarch64"):
+        line(False, "This is ARM Windows",
+             "MT5's Python API ships x86-64 wheels only")
+        print("      MetaTrader5 on PyPI: win32 and win_amd64 only — never win_arm64.")
+        print("      MT5 itself may run here, but pip install MetaTrader5 cannot work,")
+        print("      so the robot cannot connect to it. Use an x86-64 Windows VM")
+        print("      (Intel Mac, Parallels/VMware, or a Windows VPS) instead.")
     line(_sys.version_info >= (3, 10), "Python",
          f"{_sys.version.split()[0]} (3.10+ required)")
     line(True, "Interpreter", _sys.executable)
@@ -360,15 +373,15 @@ def cmd_doctor(args) -> int:
 
     print("\nMetaTrader 5 terminal")
     if _sys.platform == "darwin":
-        from .live.mt5_broker import find_mac_mt5_app
+        from .live.mt5_broker import diagnose_mac_bundle, find_mac_mt5_app
         app = find_mac_mt5_app()
         if app:
-            line(True, "MetaTrader 5.app", app)
-        else:
-            line(False, "MetaTrader 5.app", "NOT FOUND")
-            print("      Looked in /Applications and ~/Applications.")
-            print("      List what you have:  ls /Applications | grep -i meta")
-            print("      Then:  export MT5_APP=\"/Applications/<exact name>.app\"")
+            ok_bundle, why = diagnose_mac_bundle(app)
+            if ok_bundle:
+                line(True, "MetaTrader 5.app", app)
+            else:
+                line(False, "MetaTrader 5.app has no usable Wine runtime", app)
+                print("      " + why.replace("\n", "\n      "))
     else:
         app = None
         line(True, "Platform check", "macOS-specific checks skipped")

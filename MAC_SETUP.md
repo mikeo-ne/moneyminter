@@ -479,6 +479,69 @@ regardless of how good the equity curve looks.
 
 ---
 
+## Using a virtual machine on your Mac
+
+**Check one thing before anything else: is your Mac Apple Silicon (M1/M2/M3/M4)
+or Intel?** Apple menu → About This Mac → "Chip".
+
+```bash
+uname -m        # arm64 = Apple Silicon, x86_64 = Intel
+```
+
+### If it says `x86_64` (Intel Mac) — a Windows VM works
+
+VirtualBox runs x86 Windows fine on an Intel Mac. Make sure the guest is
+**64-bit Windows**, because `MetaTrader5` publishes `win_amd64` wheels only.
+
+```bash
+# inside the Windows VM, in PowerShell
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+pip install MetaTrader5          # must succeed — it cannot on ARM Windows
+```
+
+Then install MT5 there and follow Steps 1–4 inside the VM. This is a genuine
+Windows environment with no Wine layer, so it behaves exactly like the VPS route.
+
+### If it says `arm64` (Apple Silicon) — it will not work
+
+VirtualBox on Apple Silicon cannot run x86 Windows guests; it only virtualises
+ARM64 systems, and its Windows-on-ARM support is experimental at best. That
+matters because of one hard fact:
+
+> **`MetaTrader5` publishes `win32` and `win_amd64` wheels only — never
+> `win_arm64`.**
+
+Verified against the current release (5.0.6231): every wheel in every published
+version is `win32` or `win_amd64`. So inside an ARM Windows VM, MT5 itself would
+install and run, `pip install MetaTrader5` would fail, and no driver could ever
+attach to the terminal. `python -m moneyminter doctor` detects this and says so.
+
+Two related traps:
+
+- Running the Intel VirtualBox build through Rosetta 2 does **not** help.
+  Rosetta translates a Mac application; it does not turn an ARM guest into an x86
+  one, so the Windows Python inside stays ARM and the wheel still won't install.
+- `mt5_mac` (the macOS bridge) has the same problem from a different angle: it
+  runs the Windows Python from MT5.app's bundled Wine, which is x86. On an Apple
+  Silicon Mac that runtime is either absent (your case) or emulated through
+  Rosetta, and it is why the bridge is so fragile there.
+
+### The comparison that matters
+
+| Route | Works on your Mac? | Why |
+|---|---|---|
+| **Windows VPS** (yours or a friend's) | ✅ | x86-64 Windows, native, always on |
+| Windows VM on an **Intel** Mac | ✅ | x86-64 guest, native |
+| **UTM / QEMU with x86 emulation** | ⚠️ | Can run an x86 guest, but full-system emulation is roughly 5–20× slower. Fine for a smoke test, poor for 24/5 |
+| **VirtualBox** on Apple Silicon | ❌ | No x86 guests; ARM Windows only, and then no `MetaTrader5` wheel |
+| **Parallels** on Apple Silicon | ❌ | Same architecture wall — it virtualises ARM, and emulation doesn't reach the CPython API |
+| `mt5_mac` on this Mac | ❌ | Your bundle has no Wine runtime (Step 5) |
+
+If you have an Apple Silicon Mac and no PC, the honest answer is a **Windows
+VPS** — roughly $10/month, and it removes every failure mode in this document at
+once.
+
 ## Using your friend's VPS
 
 The cheapest route, and it works — the VPS provider never knows or cares whose
@@ -568,6 +631,8 @@ that's fine. Don't build something you depend on and leave it there indefinitely
 | `doctor` works but your edit doesn't seem to apply | You are running an installed copy in `site-packages`; check the `Code in use` line in `doctor` |
 | `zsh: command not found: python` | Venv not activated. `source .venv/bin/activate`, or run `.venv/bin/python -m moneyminter ...` |
 | `✗ wine64` missing / only `SharedSupport/wine` exists | No usable Wine runtime in the bundle — see the table in Step 5 |
+| `pip install MetaTrader5` fails in a Windows VM | The VM is ARM Windows. `MetaTrader5` ships `win_amd64` only — use an x86-64 VM or a VPS |
+| `doctor` says "This is ARM Windows" | Same cause; `python -m moneyminter doctor` explains it |
 | `setup gone` in the log | Normal. Price ran past the stop before the order went out, so the trade was skipped |
 | `Order rejected: retcode=10019` | Not enough free margin for that lot size — lower `--risk` |
 | `No module named mt5_mac` | `pip install mt5_mac` in the activated venv |

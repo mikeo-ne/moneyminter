@@ -350,3 +350,53 @@ def test_loopback_bind_defaults_to_no_password():
     assert a.auth is None                 # CLI decides: loopback -> off
     b = p.parse_args(["dashboard", "--host", "0.0.0.0"])
     assert b.auth is None                 # CLI decides: public -> on
+
+
+# ------------------------------------------------------- virtual machines
+def test_doctor_flags_arm_windows_as_unsusable_for_the_api(monkeypatch, capsys):
+    """Windows-on-ARM is the most confusing VM setup.
+
+    MT5 itself installs and runs, so everything looks fine — but the
+    MetaTrader5 package only ever ships win32/win_amd64 wheels, so
+    `pip install MetaTrader5` cannot succeed and no driver can attach.
+    """
+    import platform
+    import sys
+    from moneyminter.cli import main
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform, "machine", lambda: "ARM64")
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "ARM Windows" in out
+    assert "win_amd64 only" in out
+    assert "x86-64 Windows VM" in out
+
+
+def test_doctor_does_not_complain_on_x86_windows(monkeypatch, capsys):
+    import platform
+    import sys
+    from moneyminter.cli import main
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    main(["doctor"])
+    assert "This is ARM Windows" not in capsys.readouterr().out
+
+
+def test_doctor_distinguishes_installed_from_usable_macos_bundle(tmp_path, monkeypatch, capsys):
+    """"MT5.app exists" and "MT5 can be driven from Python" are different."""
+    import os
+    import sys
+    from moneyminter.cli import main
+    import moneyminter.live.mt5_broker as mb
+
+    app = os.path.join(str(tmp_path), "MetaTrader 5.app")
+    os.makedirs(os.path.join(app, "Contents", "MacOS"))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(mb, "find_mac_mt5_app", lambda: app)
+
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "no usable Wine runtime" in out
+    assert "no wine executable anywhere inside the bundle" in out
