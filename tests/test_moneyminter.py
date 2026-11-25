@@ -412,7 +412,7 @@ def test_doctor_explains_the_linux_route_and_its_limits(monkeypatch, capsys):
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
     main(["doctor"])
     out = capsys.readouterr().out
-    assert "Wine + Windows Python + mt5linux" in out
+    assert "mt5server.exe" in out
     assert "--mt5-host" in out
 
     monkeypatch.setattr(platform, "machine", lambda: "aarch64")
