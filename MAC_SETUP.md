@@ -482,11 +482,19 @@ regardless of how good the equity curve looks.
 ## Using a virtual machine on your Mac
 
 **Check one thing before anything else: is your Mac Apple Silicon (M1/M2/M3/M4)
-or Intel?** Apple menu → About This Mac → "Chip".
+or Intel?**
 
 ```bash
-uname -m        # arm64 = Apple Silicon, x86_64 = Intel
+sysctl -n machdep.cpu.brand_string    # on the Mac itself
 ```
+
+That prints either `Apple M2` (Apple Silicon) or something like `Intel(R) Core(TM)
+i7-9750H` (Intel).
+
+> **`uname -m` is not the test.** Run it *inside* a VM and it reports the
+> **guest's** architecture, not your Mac's. An Apple Silicon Mac running an ARM
+> Kali VM says `aarch64`; an Intel Mac running x86 Windows says `x86_64`. Neither
+> tells you what you need to know. Use `sysctl` on the host.
 
 ### If it says `x86_64` (Intel Mac) — a Windows VM works
 

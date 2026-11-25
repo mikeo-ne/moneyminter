@@ -400,3 +400,23 @@ def test_doctor_distinguishes_installed_from_usable_macos_bundle(tmp_path, monke
     out = capsys.readouterr().out
     assert "no usable Wine runtime" in out
     assert "no wine executable anywhere inside the bundle" in out
+
+
+def test_doctor_explains_the_linux_route_and_its_limits(monkeypatch, capsys):
+    """Linux has no native MT5, and ARM makes it far worse."""
+    import platform
+    import sys
+    from moneyminter.cli import main
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "Wine + Windows Python + mt5linux" in out
+    assert "--mt5-host" in out
+
+    monkeypatch.setattr(platform, "machine", lambda: "aarch64")
+    main(["doctor"])
+    out = capsys.readouterr().out
+    assert "too" in out and "slow" in out
+    assert "Use a Windows VPS" in out

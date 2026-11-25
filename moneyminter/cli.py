@@ -382,9 +382,12 @@ def cmd_doctor(args) -> int:
             else:
                 line(False, "MetaTrader 5.app has no usable Wine runtime", app)
                 print("      " + why.replace("\n", "\n      "))
+    elif _sys.platform.startswith("linux"):
+        from .live.mt5_broker import linux_mt5_advice
+        ok_linux, why = linux_mt5_advice()
+        line(ok_linux, "Linux MT5", why)
     else:
-        app = None
-        line(True, "Platform check", "macOS-specific checks skipped")
+        line(True, "Platform check", "macOS/Linux-specific checks skipped")
 
     print("\nPython drivers")
     for mod, label, hint in (

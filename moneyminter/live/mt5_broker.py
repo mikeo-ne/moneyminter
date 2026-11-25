@@ -20,6 +20,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import platform
 import sys
 import math
 import time
@@ -269,6 +270,31 @@ def _preflight_mac_backend(backend: str) -> None:
             "    which avoids the macOS Wine layer entirely. See LIVE_TRADING.md §0c."
         )
     _patch_mt5_mac_app(app)
+
+
+def linux_mt5_advice() -> tuple[bool, str]:
+    """Can this Linux machine drive MetaTrader 5 at all? Returns (ok, why).
+
+    Linux has no native MT5: the terminal is a Windows binary, so the only route
+    is Wine plus the Windows build of CPython plus the MetaTrader5 wheel, then
+    ``mt5linux`` to expose it over RPyC (``--mt5-host``).
+
+    That stack is x86-64. On ARM it needs full instruction emulation
+    (box64/qemu), which is roughly an order of magnitude slower and far too
+    fragile to leave trading unattended — so we say so instead of letting
+    someone discover it three layers down.
+    """
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return False, (
+            f"{machine} — MT5 under Wine would need x86 emulation, which is too "
+            "slow/fragile to trade with. Use a Windows VPS, or an x86-64 host.\n"
+            "      Offline work (backtest / validate / demo / dashboard) runs fine here.")
+    return True, (
+        f"{machine} — MT5 has no Linux build, so Wine + Windows Python + "
+        "mt5linux is the only route.\n"
+        "      Simpler: point at a Windows machine instead —\n"
+        "        python -m moneyminter connect --mt5-host <windows-ip> --mt5-port 18812")
 
 
 def _explain_init_failure(exc: Exception) -> str:
