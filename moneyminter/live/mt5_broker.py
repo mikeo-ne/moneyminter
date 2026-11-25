@@ -291,9 +291,9 @@ def linux_mt5_advice() -> tuple[bool, str]:
             "slow/fragile to trade with. Use a Windows VPS, or an x86-64 host.\n"
             "      Offline work (backtest / validate / demo / dashboard) runs fine here.")
     return True, (
-        f"{machine} — MT5 has no Linux build, so Wine + Windows Python + "
-        "mt5linux is the only route.\n"
-        "      Simpler: point at a Windows machine instead —\n"
+        f"{machine} — MT5 has no Linux build. Either run MT5 under Wine here and\n"
+        "      start the bridge with `wine mt5server.exe --port 18812` (mt5linux),\n"
+        "      or point at a Windows machine that is already running it:\n"
         "        python -m moneyminter connect --mt5-host <windows-ip> --mt5-port 18812")
 
 
@@ -372,10 +372,13 @@ def _connect_rpyc(host: str, port: int):
     except Exception as exc:  # noqa: BLE001
         raise MT5Error(
             f"Could not reach the MT5 bridge at {host}:{port} ({exc}).\n"
-            "Start the bridge on the machine running MetaTrader 5:\n"
-            "  Linux/Wine : python -m mt5linux <path-to-windows-python.exe>\n"
-            "  Windows    : python -m mt5linux\n"
-            "  Apple M-series: docker compose up  (siliconmetatrader5, port 8001)"
+            "The bridge is a server process that sits next to MetaTrader 5 and\n"
+            "re-exposes its API over RPyC. Start it ON the MT5 machine:\n"
+            "  Windows    : mt5server.exe --port 18812   (from mt5linux releases)\n"
+            "  Linux+Wine : wine mt5server.exe --port 18812   (with MT5 in the same prefix)\n"
+            "  Apple M    : docker compose up   (siliconmetatrader5, port 8001)\n"
+            "Then allow inbound TCP 18812 through that machine's firewall, and\n"
+            "confirm from here:  python -m moneyminter connect --mt5-host <ip>"
         ) from exc
     log.info("Connected to remote MT5 bridge at %s:%s", host, port)
     mt5 = conn.modules.MetaTrader5

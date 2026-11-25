@@ -496,7 +496,10 @@ i7-9750H` (Intel).
 > Kali VM says `aarch64`; an Intel Mac running x86 Windows says `x86_64`. Neither
 > tells you what you need to know. Use `sysctl` on the host.
 
-### If it says `x86_64` (Intel Mac) — a Windows VM works
+### If it says Intel — a Windows VM works
+
+Full walkthrough, including the ISO, VirtualBox settings and the RPyC bridge:
+**[WINDOWS_VM.md](WINDOWS_VM.md)**. The short version:
 
 VirtualBox runs x86 Windows fine on an Intel Mac. Make sure the guest is
 **64-bit Windows**, because `MetaTrader5` publishes `win_amd64` wheels only.

@@ -620,3 +620,31 @@ def test_find_wine_binary_scans_beyond_known_layouts(tmp_path):
         fh.write("#!/bin/sh\n")
     os.chmod(exe, 0o755)
     assert mb.find_wine_binary(app) == exe
+
+
+def test_bridge_error_names_the_actual_server_binary():
+    """Regression: the help text said `python -m mt5linux`, which does not exist.
+
+    mt5linux ships mt5server.exe — a Windows binary started with Wine on Linux —
+    so anyone following the old advice got 'No module named mt5linux' on Windows.
+    """
+    import pytest
+    import moneyminter.live.mt5_broker as mb
+
+    with pytest.raises(mb.MT5Error) as err:
+        mb._connect_rpyc("127.0.0.1", 18999)
+    msg = str(err.value)
+    assert "mt5server.exe" in msg
+    assert "python -m mt5linux" not in msg
+    assert "--mt5-host" in msg
+
+
+def test_windows_installer_exists_and_checks_for_arm():
+    """deploy/setup-windows.ps1 must refuse Windows-on-ARM up front."""
+    from pathlib import Path
+    script = (Path(__file__).resolve().parents[1] / "deploy/setup-windows.ps1").read_text()
+    assert "PROCESSOR_ARCHITECTURE" in script
+    assert "win_arm64" in script
+    assert "MetaTrader5" in script and "mt5server" in script
+    # it must not leave a broken env behind silently
+    assert "pip install --quiet" in script
